@@ -1,0 +1,14 @@
+# Build output
+/bin/
+
+# Milestone notes for the maintainer, not part of the repo
+/notes/
+
+# Secrets
+.env
+
+# Test and profiling artefacts
+*.test
+*.out
+*.prof
+coverage.*

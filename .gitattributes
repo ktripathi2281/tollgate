@@ -1,0 +1,3 @@
+# The code is edited from Windows and built in Linux (WSL, CI, Docker).
+# Force LF everywhere so gofmt and the shell scripts see the same bytes.
+* text=auto eol=lf
