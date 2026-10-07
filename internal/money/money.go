@@ -3,7 +3,12 @@
 // floating point can't represent most decimal amounts exactly.
 package money
 
-import "errors"
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+)
 
 // Micros is an amount in micro-USD. One US dollar is 1_000_000 Micros.
 type Micros int64
@@ -20,9 +25,33 @@ const PerUSD Micros = 1_000_000
 // Prices in the config are decimal strings parsed with this function: "0.075"
 // USD per million tokens is 75_000 Micros per million tokens.
 func ParseUSD(s string) (Micros, error) {
-	// EXERCISE: implement ParseUSD; money_test.go has every case it must pass.
-	// Hint: split on '.', parse each side with strconv.ParseUint (base 10), right-pad
-	// the fraction to six digits, and check for overflow before multiplying by PerUSD.
-	_ = s
-	return 0, errors.New("money: ParseUSD is not implemented yet")
+	whole, frac, hasPoint := strings.Cut(s, ".")
+	if whole == "" || (hasPoint && frac == "") {
+		return 0, fmt.Errorf("money: %q is not a decimal amount", s)
+	}
+	if len(frac) > 6 {
+		return 0, fmt.Errorf("money: %q has more than 6 decimal places", s)
+	}
+
+	// ParseUint in base 10 accepts digits only: no sign, spaces, exponent,
+	// underscores or hex prefix.
+	dollars, err := strconv.ParseUint(whole, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("money: parse %q: %w", s, err)
+	}
+	var micros uint64
+	if frac != "" {
+		// Right-pad to six digits: ".075" is 75_000 millionths, not 75.
+		micros, err = strconv.ParseUint(frac+strings.Repeat("0", 6-len(frac)), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("money: parse %q: %w", s, err)
+		}
+	}
+
+	// Go integer arithmetic wraps silently, so check before multiplying:
+	// dollars*1e6 + micros <= MaxInt64 rearranges to the test below.
+	if dollars > (math.MaxInt64-micros)/uint64(PerUSD) {
+		return 0, fmt.Errorf("money: %q is too large", s)
+	}
+	return Micros(dollars*uint64(PerUSD) + micros), nil
 }
