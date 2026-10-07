@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M1, non-streaming through the mock. Built; waiting for the maintainer's review, the M1 exercise and the SDK check.
+**Current milestone:** M1, non-streaming through the mock. Complete; waiting for the go-ahead on M2.
 
 ## Done
 
@@ -13,13 +13,13 @@
 
 | Check | Status |
 |---|---|
-| A stock OpenAI SDK gets a valid completion from `mock-fast` (manual) | curl check passes; `scripts/openai_sdk_check.py` written, not yet run (needs `pip install openai`) |
-| Validation table tests cover every supported and unsupported field | pass, except the `stop` cases, which wait for the exercise |
+| A stock OpenAI SDK gets a valid completion from `mock-fast` (manual) | passes: `scripts/openai_sdk_check.py` with openai 3.26.0, and `scripts/curl_check.sh` (2026-10-07) |
+| Validation table tests cover every supported and unsupported field | passes |
 | The in-flight cap sheds with 503 under a concurrency test | passes (`TestInflightCapShedsExcessRequests`) |
 
 ## Next
 
-- Maintainer: implement `parseStop`, run the SDK check, review M1.
+- Maintainer: review M1 and give the go-ahead for M2.
 - M2: streaming.
 
 ## Open questions
@@ -28,4 +28,4 @@
 
 ## Pending exercises
 
-- **M1: `parseStop`** in `internal/api/stop.go`. Tests: `internal/api/stop_test.go` and `TestParseStopParam` in `internal/api/request_test.go`. Until it's implemented, `make test` (and so CI) fails in `internal/api`, and any request with a non-null `stop` gets a 400.
+- None. The M1 exercise (`parseStop`) is done.
