@@ -1,0 +1,30 @@
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose  # HTTP response bodies are closed
+    - errorlint  # errors are compared with errors.Is/As and wrapped with %w
+    - misspell
+    - noctx      # HTTP requests, listeners and commands carry a context
+    - nolintlint # //nolint directives name the linter and say why
+    - unconvert  # no redundant type conversions
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      # Unchecked errors from Close, fmt.Fprint and similar calls where
+      # there is nothing useful to do with the error.
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/ktripathi2281/tollgate
