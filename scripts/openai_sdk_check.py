@@ -1,6 +1,7 @@
 """Manual M1 check: a stock OpenAI SDK gets a completion from the gateway.
 
-One-time setup, from the repo root inside WSL:
+One-time setup, from the repo root inside WSL. Ubuntu needs its venv
+package first (sudo apt install python3-venv):
 
     python3 -m venv .venv
     .venv/bin/pip install openai
@@ -9,7 +10,11 @@ Then start the gateway with `make run` and, in another terminal:
 
     .venv/bin/python scripts/openai_sdk_check.py
 
+Windows Python works too, since WSL forwards localhost:8080 to Windows:
+create the venv with `python -m venv .venv` and run `.venv\\Scripts\\python`.
+
 Set GATEWAY_URL to point somewhere other than http://localhost:8080/v1.
+Last run: openai 3.26.0, 2026-10-07.
 """
 
 import os
