@@ -1,0 +1,14 @@
+# Development config, used by `make run`.
+#
+# Secrets never go in this file. They come from the environment: provider
+# keys from the variables named by each provider's api_key_env, and the
+# database from DATABASE_URL. Fields left out take the defaults in
+# internal/config.
+
+server:
+  addr: ":8080"
+  shutdown_grace: 30s
+  read_header_timeout: 10s
+
+log:
+  level: info
