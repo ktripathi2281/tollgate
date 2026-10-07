@@ -42,6 +42,22 @@ func mainCommand(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// mockConfig is a valid config with one mock-backed alias, "mock-fast".
+const mockConfig = `
+providers:
+  mock:
+    type: mock
+    output_tokens: 5
+models:
+  mock-fast:
+    default_max_tokens: 64
+    max_tokens_ceiling: 256
+    targets:
+      - { provider: mock, model: mock-1 }
+pricing:
+  mock/mock-1: { input: "1.00", output: "2.00" }
+`
+
 func writeConfig(t *testing.T, yaml string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -116,7 +132,7 @@ func TestServeExitsCleanlyOnSIGTERM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	path := writeConfig(t, "server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n")
+	path := writeConfig(t, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n")
 	cmd := mainCommand(ctx, "serve", "--config", path)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
