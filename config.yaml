@@ -9,6 +9,29 @@ server:
   addr: ":8080"
   shutdown_grace: 30s
   read_header_timeout: 10s
+  max_body_bytes: 2097152
+  max_inflight: 2000
 
 log:
   level: info
+
+providers:
+  # A fake provider that generates text locally, so the gateway works
+  # without any provider keys.
+  mock:
+    type: mock
+    ttft: 100ms
+    token_interval: 10ms
+    output_tokens: 50
+
+models:
+  mock-fast:
+    default_max_tokens: 256
+    max_tokens_ceiling: 1024
+    targets:
+      - { provider: mock, model: mock-1 }
+
+# USD per million tokens, as decimal strings. Every target needs a price.
+# The mock's price is fake but non-zero, so the cost path is exercised.
+pricing:
+  mock/mock-1: { input: "1.00", output: "2.00" }
