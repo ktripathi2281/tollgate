@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // maxStopSequences is OpenAI's limit on stop sequences.
@@ -16,9 +17,28 @@ const maxStopSequences = 4
 // The returned error describes the problem in a few words, such as "expected
 // at most 4 stop sequences"; the caller adds the parameter name.
 func parseStop(raw json.RawMessage) ([]string, error) {
-	// EXERCISE: implement parseStop; stop_test.go has every case it must pass.
-	// Hint: try json.Unmarshal into a string first and then into a []string; if both
-	// fail, the type is wrong. Check the count and empty sequences after decoding.
-	_ = raw
-	return nil, errors.New("parseStop is not implemented yet")
+	// The parameter has two shapes, so try the string first and fall back
+	// to the array. If neither decodes, the JSON type is wrong.
+	var seqs []string
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil {
+		seqs = []string{one}
+	} else if err := json.Unmarshal(raw, &seqs); err != nil {
+		return nil, errors.New("expected a string or an array of strings")
+	}
+
+	if len(seqs) > maxStopSequences {
+		return nil, fmt.Errorf("expected at most %d stop sequences, got %d", maxStopSequences, len(seqs))
+	}
+	for _, s := range seqs {
+		// A JSON null inside the array also decodes to "", so this check
+		// rejects it too.
+		if s == "" {
+			return nil, errors.New("stop sequences must not be empty")
+		}
+	}
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	return seqs, nil
 }
