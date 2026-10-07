@@ -1,42 +1,64 @@
-// Package server runs the gateway's public HTTP server: routing, middleware
-// and graceful shutdown.
+// Package server runs the gateway's public HTTP server: routing, middleware,
+// handlers and graceful shutdown.
 package server
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/router"
 )
 
 // Server is the public HTTP server.
 type Server struct {
-	cfg  config.Server
-	log  *slog.Logger
-	http *http.Server
+	cfg     config.Server
+	log     *slog.Logger
+	router  *router.Router
+	now     func() time.Time // the clock; tests replace it
+	started time.Time
+	http    *http.Server
 }
 
 // New builds a Server and its routes. It doesn't listen yet; call Serve.
-func New(cfg config.Server, logger *slog.Logger) *Server {
+func New(cfg config.Server, r *router.Router, logger *slog.Logger) *Server {
+	s := &Server{
+		cfg:     cfg,
+		log:     logger,
+		router:  r,
+		now:     time.Now,
+		started: time.Now(),
+	}
+	s.http = &http.Server{
+		Handler:           s.routes(),
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		// There is deliberately no WriteTimeout: it would cut off long
+		// streaming responses. Streams get per-request deadlines instead.
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+	return s
+}
+
+// routes builds the handler tree. Middleware runs outside in: every request
+// gets an ID first, then the access log, then panic recovery. API requests
+// then pass the in-flight cap; health checks skip it so they still answer
+// when the gateway is saturated.
+func (s *Server) routes() http.Handler {
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	apiMux.HandleFunc("GET /v1/models", s.handleModels)
+	apiMux.HandleFunc("/v1/", handleUnknown)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.Handle("/v1/", limitInflight(s.cfg.MaxInflight, apiMux))
 
-	return &Server{
-		cfg: cfg,
-		log: logger,
-		http: &http.Server{
-			Handler:           mux,
-			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-			// There is deliberately no WriteTimeout: it would cut off long
-			// streaming responses. Streams get per-request deadlines instead.
-			ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-		},
-	}
+	return withRequestID(logRequests(s.log, recoverPanics(s.log, mux)))
 }
 
 // Serve accepts connections on ln until ctx is cancelled, then shuts down:
@@ -84,10 +106,4 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		return fmt.Errorf("shutdown: %w", shutdownErr)
 	}
 	return nil
-}
-
-func handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	// A failed write means the client has gone; there is nobody to tell.
-	_, _ = io.WriteString(w, `{"status":"ok"}`+"\n")
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/router"
 	"github.com/ktripathi2281/tollgate/internal/server"
 )
 
@@ -27,6 +28,15 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger := newLogger(stdout, cfg.Log.SlogLevel())
 
+	providers, err := buildProviders(cfg.Providers)
+	if err != nil {
+		return err
+	}
+	r, err := router.New(cfg.Models, providers)
+	if err != nil {
+		return err
+	}
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Server.Addr)
 	if err != nil {
@@ -34,7 +44,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("listening", "addr", ln.Addr().String())
 
-	if err := server.New(cfg.Server, logger).Serve(ctx, ln); err != nil {
+	if err := server.New(cfg.Server, r, logger).Serve(ctx, ln); err != nil {
 		return err
 	}
 	logger.Info("shutdown complete")
