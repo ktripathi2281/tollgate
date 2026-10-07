@@ -80,8 +80,8 @@ func TestParseRejects(t *testing.T) {
 	}{
 		{
 			name:        "unknown field, with its line number",
-			yaml:        "server:\n  adress: \":8080\"\n",
-			wantInError: []string{"line 2", "adress"},
+			yaml:        "server:\n  port: 8080\n",
+			wantInError: []string{"line 2", "port"},
 		},
 		{
 			name:        "unknown section",
