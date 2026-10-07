@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M0, scaffold. Built; waiting for the maintainer's review and the M0 exercise.
+**Current milestone:** M0, scaffold. Built; waiting for the maintainer's review and approval to push.
 
 ## Done
 
@@ -12,14 +12,14 @@
 
 | Check | Status |
 |---|---|
-| `make build test lint` pass locally | build and lint pass; test passes except the exercise's tests |
+| `make build test lint` pass locally | passes |
 | `make build test lint` pass in CI | not pushed yet |
 | Invalid config fails at startup with a clear message | passes (`TestServeFailsOnInvalidConfig`) |
 | SIGTERM exits cleanly | passes (`TestServeExitsCleanlyOnSIGTERM`) |
 
 ## Next
 
-- Maintainer: implement `ParseUSD`, then approve pushing to GitHub.
+- Maintainer: approve pushing to GitHub, so CI can run.
 - M1: non-streaming chat completions through the mock provider.
 
 ## Open questions
@@ -28,4 +28,4 @@
 
 ## Pending exercises
 
-- **M0: `money.ParseUSD`** in `internal/money/money.go`. The tests are in `internal/money/money_test.go`. Until it's implemented, `make test` (and so CI) fails in `internal/money` only. M1 uses it to parse prices from the config.
+- None. The M0 exercise (`money.ParseUSD`) was written by Claude at the maintainer's request.
