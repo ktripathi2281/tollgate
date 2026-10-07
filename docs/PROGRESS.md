@@ -28,4 +28,4 @@
 
 ## Pending exercises
 
-- None. The M0 exercise (`money.ParseUSD`) was written by Claude at the maintainer's request.
+- None. The M0 exercise (`money.ParseUSD`) is done.

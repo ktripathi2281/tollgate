@@ -28,7 +28,7 @@ The spec is `docs/BRIEF.md`. It is long: before writing code, read the sections 
 5. Ask before adding a dependency that isn't listed in brief section 13.
 6. Push back when the brief is wrong, and propose a fix before building. Read the provider's current API reference before writing an adapter.
 7. Never ask for, print or commit secrets. Provider keys live in `.env`.
-8. Small commits, one logical change each, conventional commit messages. Ask before every push.
+8. Small commits, one logical change each, conventional commit messages. Ask before every push. Commits are authored by the maintainer only: no `Co-Authored-By` trailers and no Claude attribution, in commit messages or PR descriptions.
 9. Exercises: unless told "skip exercises", leave one small function per milestone for the maintainer (brief section 2) and list it below.
 10. Write about the system, never about who built it.
 
