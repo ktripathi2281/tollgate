@@ -12,3 +12,6 @@
 *.out
 *.prof
 coverage.*
+
+# Python virtualenv for scripts/openai_sdk_check.py
+.venv/
