@@ -81,3 +81,21 @@ Short records of non-obvious choices: the context, the decision, and the alterna
 **Decision.** A separate `internal/money` package holds the `Micros` type (integer micro-USD), price parsing, and later cost calculation. It has no dependencies, so config, budget and usage can all import it. A named type, rather than a bare `int64`, stops token counts and amounts being mixed up by accident.
 
 **Rejected.** Cost code in `internal/usage`: config would then import the package that owns the log worker and its database dependencies.
+
+## 11. Shutdown and signal handling (M0)
+
+**Context.** The brief asks for a clean exit on SIGTERM, a drain of in-flight streams for up to `shutdown_grace`, and no server `WriteTimeout`, because one would cut off long streams.
+
+**Decision.** `main` turns SIGINT and SIGTERM into a cancelled `context.Context` with `signal.NotifyContext`, and passes it down. `server.Serve` reacts to the cancelled context by calling `http.Server.Shutdown`, which stops accepting connections and waits for in-flight requests, with a fresh timeout of `shutdown_grace`. If the grace period runs out, `Close` drops the remaining connections, and `Serve` returns an error, so the exit status is non-zero. After the first signal, default signal handling is restored (`context.AfterFunc(ctx, stop)`), so a second Ctrl-C kills the process at once. `ReadHeaderTimeout` is set and `WriteTimeout` is deliberately not.
+
+**Rejected.** A goroutine that calls `os.Exit` from a signal handler: it skips the drain and every deferred cleanup. Treating an expired grace period as a clean exit: it hides requests that were cut off.
+
+M2 extends this: request contexts will derive from a base context that is cancelled when the grace period ends, so handlers see the cancellation and unwind holds and reservations before the process exits.
+
+## 12. End-to-end process tests re-run the test binary (M0)
+
+**Context.** "SIGTERM exits cleanly" and "invalid config fails at startup" are claims about a real process: its signals, exit code and stderr. Calling `run` in-process can't test either.
+
+**Decision.** `TestMain` in `cmd/tollgate` checks an environment variable. When it is set, the test binary runs the real `main` instead of the tests. Tests start `os.Args[0]` as a child process with that variable set, read its JSON logs from stdout, send it SIGTERM, and check the exit status. The SIGTERM test is skipped on Windows, which can't deliver SIGTERM to another process.
+
+**Rejected.** Running `go build` inside the test: slower, and it depends on the toolchain being on `PATH` at test time. Sending the signal to the test process itself: it would test signal delivery, but not the exit status or the shutdown logs.
