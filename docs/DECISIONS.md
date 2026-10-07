@@ -57,3 +57,19 @@ Short records of non-obvious choices: the context, the decision, and the alterna
 **Decision.** Both cases return 503 with `Retry-After` and a distinct error `code`.
 
 **Rejected.** 429: clients would read it as the key's own rate limit, and OpenAI SDKs retry it as if it were.
+
+## 8. YAML library: go.yaml.in/yaml/v3 (M0)
+
+**Context.** The brief asks for a maintained YAML library. The long-standard `gopkg.in/yaml.v3` was archived in April 2025.
+
+**Decision.** `go.yaml.in/yaml/v3`, the same code now maintained by the YAML organisation. Its v3 API is frozen and receives security fixes. It decodes durations such as `30s` into `time.Duration`, and `KnownFields(true)` turns unknown keys into errors with line numbers.
+
+**Rejected.** `go.yaml.in/yaml/v4`: still a release candidate. `github.com/goccy/go-yaml`: maintained and has good error messages, but a frozen, widely used API is the safer choice for a config loader that needs nothing new.
+
+## 9. Config: strict decoding, defaults, every problem reported at once (M0)
+
+**Context.** The brief asks for startup validation with clear messages.
+
+**Decision.** The file is decoded on top of `config.Default()`, so it only needs the fields that differ. Unknown keys and a second YAML document are errors. Validation collects every problem into one `ValidationError`, so a broken file is fixed in one pass. The config grows one section per milestone, as the code that uses each section arrives, so no field exists before something reads it.
+
+**Rejected.** Writing the whole section 12 schema in M0: it would add fields with no code behind them and validation that couldn't be tested end to end. Returning the first error only: it makes fixing a config a restart loop. Overriding non-secret fields from environment variables: nothing needs it yet, and secrets already come only from the environment.
