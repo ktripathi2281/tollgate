@@ -73,3 +73,11 @@ Short records of non-obvious choices: the context, the decision, and the alterna
 **Decision.** The file is decoded on top of `config.Default()`, so it only needs the fields that differ. Unknown keys and a second YAML document are errors. Validation collects every problem into one `ValidationError`, so a broken file is fixed in one pass. The config grows one section per milestone, as the code that uses each section arrives, so no field exists before something reads it.
 
 **Rejected.** Writing the whole section 12 schema in M0: it would add fields with no code behind them and validation that couldn't be tested end to end. Returning the first error only: it makes fixing a config a restart loop. Overriding non-secret fields from environment variables: nothing needs it yet, and secrets already come only from the environment.
+
+## 10. A small `internal/money` package (M0)
+
+**Context.** Section 14 places cost calculation in `internal/usage`, next to the async request-log worker. Config loading (from M1) has to parse prices, and so does budget code (M5).
+
+**Decision.** A separate `internal/money` package holds the `Micros` type (integer micro-USD), price parsing, and later cost calculation. It has no dependencies, so config, budget and usage can all import it. A named type, rather than a bare `int64`, stops token counts and amounts being mixed up by accident.
+
+**Rejected.** Cost code in `internal/usage`: config would then import the package that owns the log worker and its database dependencies.
