@@ -27,7 +27,7 @@ func Handler(p *Provider) http.Handler {
 		handleChat(w, r, p)
 	})
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, api.NewModelList([]string{"mock-1"}, time.Now()))
+		api.WriteJSON(w, http.StatusOK, api.NewModelList([]string{"mock-1"}, time.Now()))
 	})
 	return mux
 }
@@ -47,12 +47,12 @@ type chatRequest struct {
 func handleChat(w http.ResponseWriter, r *http.Request, p *Provider) {
 	var in chatRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&in); err != nil {
-		writeError(w, &api.Error{Status: 400, Type: api.TypeInvalidRequest, Code: api.CodeInvalidJSON,
+		api.WriteError(w, &api.Error{Status: 400, Type: api.TypeInvalidRequest, Code: api.CodeInvalidJSON,
 			Message: fmt.Sprintf("mock: invalid JSON body: %v", err)})
 		return
 	}
 	if in.Stream {
-		writeError(w, &api.Error{Status: 400, Type: api.TypeInvalidRequest, Code: api.CodeUnsupportedValue,
+		api.WriteError(w, &api.Error{Status: 400, Type: api.TypeInvalidRequest, Code: api.CodeUnsupportedValue,
 			Param: "stream", Message: "mock: streaming is not implemented yet"})
 		return
 	}
@@ -73,7 +73,7 @@ func handleChat(w http.ResponseWriter, r *http.Request, p *Provider) {
 		writeProviderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-mock-"+rand.Text(), time.Now(), resp))
+	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-mock-"+rand.Text(), time.Now(), resp))
 }
 
 // textParts reads message content leniently: a string, or the text of an
@@ -97,7 +97,7 @@ func textParts(raw json.RawMessage) []string {
 func writeProviderError(w http.ResponseWriter, err error) {
 	perr, ok := errors.AsType[*provider.Error](err)
 	if !ok {
-		writeError(w, &api.Error{Status: 500, Type: api.TypeServer, Message: err.Error()})
+		api.WriteError(w, &api.Error{Status: 500, Type: api.TypeServer, Message: err.Error()})
 		return
 	}
 	typ := api.TypeInvalidRequest
@@ -107,20 +107,5 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	if perr.RetryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(int(perr.RetryAfter.Seconds())))
 	}
-	writeError(w, &api.Error{Status: perr.Status, Type: typ, Message: perr.Message})
-}
-
-func writeError(w http.ResponseWriter, e *api.Error) {
-	writeJSON(w, e.Status, e.Envelope())
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(body)
+	api.WriteError(w, &api.Error{Status: perr.Status, Type: typ, Message: perr.Message})
 }
