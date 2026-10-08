@@ -160,3 +160,48 @@ Inside messages, roles `system`, `developer`, `user` and `assistant` are support
 - **Validation returns `error`, not `*api.Error`.** A function returning a nil `*Error` through an `error` interface produces a non-nil interface value. Returning `error` and unwrapping with `errors.AsType` avoids that trap.
 - **The `Provider` interface lives in `internal/provider`,** not with the router that consumes it. It is the contract every adapter implements, the way `io.Reader` lives in `io`.
 - **Pricing arrives with targets in M1,** because "every target has a price" is a startup check on targets. Prices are first used for cost in M5. Decision 9's rule ("no field exists before something reads it") still holds, with validation as the reader.
+
+## 20. The commit point lives in the router (M2)
+
+**Context.** Brief section 8: write nothing until the first content arrives; before that, a failure may still retry or fall back (M3); after it, it can't.
+
+**Decision.** `router.ChatStream` opens the provider stream and reads up to the commit point: the first chunk with content or a finish reason, or the end of the stream. A failure before that is returned as an ordinary error, and the server answers with an ordinary JSON error response. After that, the caller gets a committed `router.Stream` and writes the response headers. Keepalive chunks (a chunk with no fields set, such as an Anthropic ping) are dropped before the commit point; after it, `Stream.Next` skips them but uses them to reset the idle timeout. A usage chunk that arrives before any content is kept, not dropped. `provider.Stream` follows the brief's shape (`Next` returning `io.EOF`, plus `Close`), used from one goroutine. A stream keeps the context it was opened with, the way an `http.Response` body does; that is the usual exception to "don't store contexts in structs".
+
+**Rejected.** Committing on the first chunk of any kind: OpenAI's first chunk is an empty role delta, so the gateway would commit before knowing the upstream can produce content, and lose the chance to fall back. Range-over-func iterators (`iter.Seq2`) instead of `Next`/`Close`: they make the end-of-stream cleanup implicit, which is harder to explain and to test.
+
+## 21. Timeouts are a watchdog timer that cancels the stream's context (M2)
+
+**Context.** Separate first-token, idle and total timeouts, without a goroutine per chunk, and without a blanket `http.Client.Timeout` or server `WriteTimeout`.
+
+**Decision.** Each stream has one `time.AfterFunc` timer, the watchdog. Until the commit point it enforces `first_token`, counted from the start of the call, so it includes opening the stream. Keepalives don't extend it, because they don't show the model is producing anything. At the commit point it is replaced by an `idle` timer, which every chunk, keepalives included, resets. When a watchdog fires, it cancels the stream's context with a cause (`context.WithCancelCause`): `ErrFirstTokenTimeout` or `ErrIdleTimeout`. `total` is a `context.WithTimeoutCause` covering the whole call, attempts and stream included. The provider only sees its context end; the router reads the cause and returns it. Every timeout error wraps `context.DeadlineExceeded`, so the server maps all of them to 504 `upstream_timeout`, and `provider.ClassOf` treats them as Unavailable. A non-streaming call gets the total deadline only, because it has no first token to watch. The connect timeout arrives with the HTTP adapters in M3, as a transport setting.
+
+**Rejected.** Running `Next` in a goroutine and racing it against a timer: a goroutine per chunk, which the brief rules out, and the abandoned read can't be stopped. Resetting the same timer at the commit point: `Reset` reschedules the original function, which reported every timeout as a first-token timeout. A test caught this.
+
+## 22. What a client sees when a stream fails (M2)
+
+**Decision.** If the stream fails after the commit point, the gateway sends one last event in OpenAI's error shape, `data: {"error": {...}}`, and ends the stream without `data: [DONE]`. The OpenAI Python SDK raises `APIError` when it sees an event with an `error` key; this was checked with openai 3.26.0 against the `mock-flaky` alias. The finish chunk is sent once the upstream ends; a stream that ends without a reason gets `stop`. The usage chunk (empty `choices`, the totals) is sent only when the client asked with `stream_options.include_usage`. Other chunks omit `usage` rather than sending `null`; SDKs treat the two the same. When the provider reports no usage, the gateway estimates it at about four characters per token, and a `stream ended` log line records the outcome and `usage_estimated`. M5 and M6 store this instead of only logging it.
+
+**Rejected.** Sending `[DONE]` after the error event: a client that only waits for `[DONE]` would take a partial reply for a complete one, which is the silent truncation the brief forbids.
+
+## 23. Shutdown: a base context with a "shutting down" cause (M2)
+
+**Context.** On SIGTERM, in-flight streams get up to `shutdown_grace` to finish, and whatever is left is then cancelled. `http.Server.Shutdown` waits for active connections but never cancels them, and `Close` drops connections without telling the handlers why.
+
+**Decision.** Every request context derives from a base context set through `http.Server.BaseContext`. If the grace period runs out, `Serve` cancels the base context with the cause `errShuttingDown`. Each handler still running sees its context end, recognises the cause, and sends a final error event with code `shutting_down` (a 503 with `Retry-After` if it hasn't committed yet). A `sync.WaitGroup` counts running handlers. `Serve` waits for them for at most `unwindTimeout` (5s), then closes the remaining connections. `Serve` returns an error when requests had to be cancelled, so the process exits with status 1. Failing readiness first arrives with `/readyz` in M6.
+
+**Rejected.** Relying on `Close` to cancel handlers: they would see an ordinary disconnect and couldn't tell the client why. A config field for the 5s unwind time: nothing needs to tune it yet.
+
+## 24. A write deadline for each stream event (M2)
+
+**Context.** One read-and-write loop gives backpressure for free: a slow client makes the write block, so the loop reads the upstream more slowly too. But a client that stops reading altogether would block a write forever, and hold the upstream stream open with it.
+
+**Decision.** Before each event the stream loop sets a write deadline of `timeouts.idle` through `http.ResponseController`, and clears it when the stream ends. It has to be cleared because the server has no `WriteTimeout`, so net/http won't reset the deadline for the next request on a kept-alive connection.
+
+**Rejected.** A server-wide `WriteTimeout`: it limits the whole response, and would cut off long streams.
+
+## 25. Smaller M2 choices (M2)
+
+- **The SSE writer lives in `internal/api`,** not `internal/server` as the brief's layout says, because the mock's HTTP server writes the same events. Otherwise the mock would have to import the gateway's server package.
+- **Timing tests run in `testing/synctest` over an in-memory `net.Pipe` network,** so the real `http.Server` and `http.Client` run on the fake clock. That makes "each event arrives when it's written" checkable to the millisecond, with no real sleeps. The disconnect test uses real TCP and the real clock instead, because it measures how fast net/http notices a closed connection. The SIGTERM drain test runs the real binary.
+- **An exercise stub returns a package-level error variable,** not an inline `errors.New`, so staticcheck can't conclude that callers' error checks are dead code.
+- **The mock gained `fail_at_chunk` and `stall_at_chunk`** for error events and stalls at a chosen point in a stream. `hang` still blocks before any response, the way unreturned response headers would.

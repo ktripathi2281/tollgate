@@ -1,26 +1,34 @@
 # Progress
 
-**Current milestone:** M1, non-streaming through the mock. Complete; waiting for the go-ahead on M2.
+**Current milestone:** M2, streaming. Built; waiting for the maintainer's review and the M2 exercise.
 
 ## Done
 
 - Toolchain in WSL Ubuntu: Go 1.27.1, sqlc 1.31.1, golangci-lint 2.14.0.
 - Brief reviewed. Six changes agreed and applied to `docs/BRIEF.md` (section 24).
 - M0: module and layout, config loading with strict validation, `tollgate serve` with `/healthz`, JSON logging, graceful shutdown on SIGINT and SIGTERM, Makefile, golangci-lint config, GitHub Actions workflow, session continuity files. CI green.
-- M1: config for providers, model aliases and prices; canonical chat types and upstream error classes (`internal/provider`); OpenAI request validation, response types and error envelope (`internal/api`); the mock provider in-process and as `cmd/mockupstream`; a router that resolves aliases (first target only); `POST /v1/chat/completions` (non-streaming) and `GET /v1/models`; request IDs, access log, panic recovery, in-flight cap; scripts for the manual SDK and curl checks.
+- M1: config for providers, model aliases and prices; canonical chat types and upstream error classes; OpenAI request validation, response types and error envelope; the mock provider in-process and as `cmd/mockupstream`; a router that resolves aliases (first target only); `POST /v1/chat/completions` (non-streaming) and `GET /v1/models`; request IDs, access log, panic recovery, in-flight cap. CI green.
+- M2: streaming in the provider interface and the mock (in-process and over HTTP); a router that reads to the commit point and applies first-token, idle and total timeouts; SSE responses with OpenAI chunks, error events after the commit point and usage estimates; a write deadline per event; shutdown that drains streams and then cancels stragglers with a "shutting down" cause; timeouts in the config.
 
-## M1 acceptance
+## M2 acceptance
 
-| Check | Status |
+All checks pass with `WriteEvent` implemented (verified against a reference solution kept outside the repo). In the repo they fail until the exercise below is done.
+
+| Check | Test |
 |---|---|
-| A stock OpenAI SDK gets a valid completion from `mock-fast` (manual) | passes: `scripts/openai_sdk_check.py` with openai 3.26.0, and `scripts/curl_check.sh` (2026-10-07) |
-| Validation table tests cover every supported and unsupported field | passes |
-| The in-flight cap sheds with 503 under a concurrency test | passes (`TestInflightCapShedsExcessRequests`) |
+| Events are flushed one at a time | `TestStreamEventsArriveOneAtATime` (internal/server) |
+| A client disconnect cancels the upstream call within 100 ms | `TestClientDisconnectCancelsUpstream` (internal/server) |
+| First-token and idle timeouts fire | `TestStreamFailureBeforeCommitIsAnErrorResponse`, `TestStreamFailureAfterCommitIsAnErrorEvent` (internal/server); `TestStreamFirstTokenTimeout`, `TestStreamIdleTimeout` (internal/router) |
+| Failure before the commit point gives an error response; after it, an SSE error event | the same two server tests |
+| SIGTERM drains an in-flight stream; stragglers are cancelled after the grace period | `TestShutdownDrainsStream`, `TestShutdownCancelsStragglers` (internal/server); `TestServeDrainsStreamOnSIGTERM` (cmd/tollgate, real signal) |
+| No goroutine leaks | `goleak` in every package that starts goroutines; `synctest` also fails any test that leaves goroutines in its bubble |
+
+The manual check `scripts/openai_sdk_check.py` passed with openai 3.26.0 (2026-10-08) against a build with the reference `WriteEvent`: streaming, the usage chunk, and a mid-stream failure raised as `openai.APIError`.
 
 ## Next
 
-- Maintainer: review M1 and give the go-ahead for M2.
-- M2: streaming.
+- Maintainer: implement `WriteEvent`, review M2.
+- M3: real providers (OpenAI-compatible and Anthropic adapters), retries, fallback, circuit breakers. Needs model IDs and prices from the maintainer.
 
 ## Open questions
 
@@ -28,4 +36,4 @@
 
 ## Pending exercises
 
-- None. The M1 exercise (`parseStop`) is done.
+- **M2: `SSEWriter.WriteEvent`** in `internal/api/sse.go`. Tests: `internal/api/sse_test.go`. Every streaming test depends on it, and so do all the M2 acceptance checks and `make test` (and CI). Until it's done, a streaming request gets its response headers and then an empty stream.
