@@ -75,9 +75,14 @@ server:
   max_inflight: 8
 log:
   level: debug
+timeouts:
+  first_token: 5s
+  idle: 2s
+  total: 1m
 `,
 			want: func() config.Config {
 				c := minimalConfig()
+				c.Timeouts = config.Timeouts{FirstToken: 5 * time.Second, Idle: 2 * time.Second, Total: time.Minute}
 				c.Server = config.Server{
 					Addr:              "127.0.0.1:9090",
 					ShutdownGrace:     5 * time.Second,
@@ -102,6 +107,8 @@ providers:
     status: 429
     hang: true
     seed: 42
+    fail_at_chunk: 3
+    stall_at_chunk: 4
 models:
   m:
     default_max_tokens: 1
@@ -115,6 +122,7 @@ pricing:
 				c.Providers = map[string]config.Provider{"flaky": {
 					Type: "mock", TTFT: 100 * time.Millisecond, TokenInterval: 10 * time.Millisecond,
 					OutputTokens: 50, ErrorRate: 0.25, Status: 429, Hang: true, Seed: 42,
+					FailAtChunk: 3, StallAtChunk: 4,
 				}}
 				c.Models = map[string]config.Model{"m": {
 					DefaultMaxTokens: 1, MaxTokensCeiling: 1,
@@ -218,6 +226,16 @@ func TestParseRejects(t *testing.T) {
 			wantInError: []string{"server.max_inflight", "must be positive"},
 		},
 		{
+			name:        "zero and negative timeouts",
+			yaml:        minimal + "timeouts:\n  first_token: 0s\n  idle: -1s\n  total: 0s\n",
+			wantInError: []string{"timeouts.first_token: must be positive", "timeouts.idle: must be positive", "timeouts.total: must be positive"},
+		},
+		{
+			name:        "timeouts longer than the total",
+			yaml:        minimal + "timeouts:\n  first_token: 2m\n  idle: 90s\n  total: 1m\n",
+			wantInError: []string{"timeouts.first_token: must not be longer than timeouts.total", "timeouts.idle: must not be longer than timeouts.total"},
+		},
+		{
 			name:        "unknown log level",
 			yaml:        minimal + "log:\n  level: verbose\n",
 			wantInError: []string{"log.level", `"verbose"`},
@@ -247,10 +265,11 @@ func TestParseRejects(t *testing.T) {
 		{
 			name: "bad mock settings",
 			yaml: strings.Replace(minimal, "output_tokens: 10",
-				"output_tokens: 0\n    ttft: -1s\n    token_interval: -1ms\n    error_rate: 1.5\n    status: 200", 1),
+				"output_tokens: 0\n    ttft: -1s\n    token_interval: -1ms\n    error_rate: 1.5\n    status: 200\n    fail_at_chunk: -1\n    stall_at_chunk: -2", 1),
 			wantInError: []string{
 				"providers.mock.output_tokens", "providers.mock.ttft", "providers.mock.token_interval",
 				"providers.mock.error_rate", "providers.mock.status",
+				"providers.mock.fail_at_chunk", "providers.mock.stall_at_chunk",
 			},
 		},
 		{

@@ -30,6 +30,7 @@ import (
 type Config struct {
 	Server    Server              `yaml:"server"`
 	Log       Log                 `yaml:"log"`
+	Timeouts  Timeouts            `yaml:"timeouts"`
 	Providers map[string]Provider `yaml:"providers"`
 	Models    map[string]Model    `yaml:"models"`
 	// Pricing is keyed by "provider/model"; see PriceKey.
@@ -59,6 +60,20 @@ type Log struct {
 	Level string `yaml:"level"`
 }
 
+// Timeouts bound how long an upstream call may take. They are per-request
+// deadlines, not server-wide timeouts, so long streams aren't cut off.
+type Timeouts struct {
+	// FirstToken is how long a stream may take to deliver its first
+	// content, from the moment the call starts.
+	FirstToken time.Duration `yaml:"first_token"`
+	// Idle is the longest gap allowed between stream chunks after the first
+	// content. It also bounds how long one write to a slow client may block.
+	Idle time.Duration `yaml:"idle"`
+	// Total is the overall deadline for a request, including every attempt
+	// and the whole stream.
+	Total time.Duration `yaml:"total"`
+}
+
 // Provider configures one upstream provider. Type selects the
 // implementation, and the remaining fields belong to that type.
 type Provider struct {
@@ -72,6 +87,9 @@ type Provider struct {
 	// from 0 to 1, that a call fails with a 500. Status, if set, makes every
 	// call fail with that HTTP status. Hang makes every call block until it
 	// is cancelled. Seed makes the generated text and failures repeatable.
+	// For streams, FailAtChunk (counting from 1) replaces that content chunk
+	// with an error event, and StallAtChunk stops sending at that chunk
+	// until the call is cancelled; 0 turns either off.
 	TTFT          time.Duration `yaml:"ttft"`
 	TokenInterval time.Duration `yaml:"token_interval"`
 	OutputTokens  int           `yaml:"output_tokens"`
@@ -79,6 +97,8 @@ type Provider struct {
 	Status        int           `yaml:"status"`
 	Hang          bool          `yaml:"hang"`
 	Seed          uint64        `yaml:"seed"`
+	FailAtChunk   int           `yaml:"fail_at_chunk"`
+	StallAtChunk  int           `yaml:"stall_at_chunk"`
 }
 
 // Model is a model alias: the name clients send as "model", mapped to an
@@ -144,6 +164,11 @@ func Default() *Config {
 			MaxInflight:       2000,
 		},
 		Log: Log{Level: "info"},
+		Timeouts: Timeouts{
+			FirstToken: 30 * time.Second,
+			Idle:       30 * time.Second,
+			Total:      300 * time.Second,
+		},
 	}
 }
 
@@ -210,6 +235,7 @@ func (c *Config) validate() error {
 	if _, ok := logLevels[c.Log.Level]; !ok {
 		p.addf("log.level", "must be one of debug, info, warn, error; got %q", c.Log.Level)
 	}
+	c.validateTimeouts(&p)
 	c.validateProviders(&p)
 	c.validatePricing(&p)
 	c.validateModels(&p)
@@ -236,6 +262,28 @@ func (c *Config) validateServer(p *problems) {
 	}
 	if s.MaxInflight <= 0 {
 		p.addf("server.max_inflight", "must be positive, got %d", s.MaxInflight)
+	}
+}
+
+func (c *Config) validateTimeouts(p *problems) {
+	t := c.Timeouts
+	for _, d := range []struct {
+		field string
+		value time.Duration
+	}{
+		{"timeouts.first_token", t.FirstToken},
+		{"timeouts.idle", t.Idle},
+		{"timeouts.total", t.Total},
+	} {
+		if d.value <= 0 {
+			p.addf(d.field, "must be positive, got %s", d.value)
+		}
+	}
+	if t.FirstToken > t.Total {
+		p.addf("timeouts.first_token", "must not be longer than timeouts.total (%s), got %s", t.Total, t.FirstToken)
+	}
+	if t.Idle > t.Total {
+		p.addf("timeouts.idle", "must not be longer than timeouts.total (%s), got %s", t.Total, t.Idle)
 	}
 }
 
@@ -275,6 +323,12 @@ func checkMock(p *problems, field string, prov Provider) {
 	}
 	if prov.Status != 0 && (prov.Status < 400 || prov.Status > 599) {
 		p.addf(field+".status", "must be an HTTP error status from 400 to 599, got %d", prov.Status)
+	}
+	if prov.FailAtChunk < 0 {
+		p.addf(field+".fail_at_chunk", "must not be negative, got %d", prov.FailAtChunk)
+	}
+	if prov.StallAtChunk < 0 {
+		p.addf(field+".stall_at_chunk", "must not be negative, got %d", prov.StallAtChunk)
 	}
 }
 
