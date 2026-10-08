@@ -31,6 +31,14 @@ providers:
     ttft: 100ms
     token_interval: 10ms
     output_tokens: 50
+  # The same, but every stream fails with an error event in place of its
+  # fifth word, to show what a mid-stream failure looks like.
+  mock-flaky:
+    type: mock
+    ttft: 100ms
+    token_interval: 10ms
+    output_tokens: 50
+    fail_at_chunk: 5
 
 models:
   mock-fast:
@@ -38,8 +46,14 @@ models:
     max_tokens_ceiling: 1024
     targets:
       - { provider: mock, model: mock-1 }
+  mock-flaky:
+    default_max_tokens: 256
+    max_tokens_ceiling: 1024
+    targets:
+      - { provider: mock-flaky, model: mock-1 }
 
 # USD per million tokens, as decimal strings. Every target needs a price.
 # The mock's price is fake but non-zero, so the cost path is exercised.
 pricing:
   mock/mock-1: { input: "1.00", output: "2.00" }
+  mock-flaky/mock-1: { input: "1.00", output: "2.00" }
