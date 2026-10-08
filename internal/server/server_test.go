@@ -46,7 +46,7 @@ func testServer(t *testing.T, p provider.Provider, mutate func(*config.Server)) 
 	r, err := router.New(map[string]config.Model{
 		"mock-fast": {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
 		"another":   {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
-	}, map[string]provider.Provider{p.Name(): p})
+	}, map[string]provider.Provider{p.Name(): p}, config.Default().Timeouts)
 	if err != nil {
 		t.Fatal(err)
 	}

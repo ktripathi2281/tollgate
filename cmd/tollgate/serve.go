@@ -32,7 +32,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	r, err := router.New(cfg.Models, providers)
+	r, err := router.New(cfg.Models, providers, cfg.Timeouts)
 	if err != nil {
 		return err
 	}

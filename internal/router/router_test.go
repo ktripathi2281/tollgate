@@ -1,8 +1,13 @@
 package router
 
 import (
+	"errors"
 	"slices"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"go.uber.org/goleak"
 
 	"github.com/ktripathi2281/tollgate/internal/config"
 	"github.com/ktripathi2281/tollgate/internal/provider"
@@ -19,7 +24,7 @@ func newRouter(t *testing.T) *Router {
 		"fast": {DefaultMaxTokens: 10, MaxTokensCeiling: 20, Targets: []config.Target{{Provider: "b", Model: "b-small"}, {Provider: "a", Model: "a-1"}}},
 		"big":  {DefaultMaxTokens: 10, MaxTokensCeiling: 20, Targets: []config.Target{{Provider: "a", Model: "a-2"}}},
 	}
-	r, err := New(models, providers)
+	r, err := New(models, providers, testTimeouts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -64,9 +69,27 @@ func TestChatUsesTheFirstTarget(t *testing.T) {
 	}
 }
 
+func TestChatTotalTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hang := mock.New("hang", mock.Config{OutputTokens: 1, Hang: true})
+		timeouts := config.Timeouts{FirstToken: time.Second, Idle: time.Second, Total: 3 * time.Second}
+		r, alias := streamRouter(t, hang, timeouts)
+
+		start := time.Now()
+		_, _, err := r.Chat(t.Context(), alias, provider.ChatRequest{})
+		if !errors.Is(err, ErrTotalTimeout) || time.Since(start) != 3*time.Second {
+			t.Errorf("got %v after %v, want ErrTotalTimeout after 3s", err, time.Since(start))
+		}
+	})
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
+
 func TestNewRejectsUnknownProvider(t *testing.T) {
 	models := map[string]config.Model{"x": {Targets: []config.Target{{Provider: "nope", Model: "m"}}}}
-	if _, err := New(models, map[string]provider.Provider{}); err == nil {
+	if _, err := New(models, map[string]provider.Provider{}, testTimeouts); err == nil {
 		t.Error("New accepted a target with an unknown provider")
 	}
 }
