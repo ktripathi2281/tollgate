@@ -45,6 +45,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	fs.IntVar(&cfg.Status, "status", 0, "fail every request with this HTTP status (400-599)")
 	fs.BoolVar(&cfg.Hang, "hang", false, "never answer: wait until the client gives up")
 	fs.Uint64Var(&cfg.Seed, "seed", 1, "random seed for the generated text and failures")
+	fs.IntVar(&cfg.FailAtChunk, "fail-at-chunk", 0, "streams send an error event in place of content chunk N (from 1); 0 is off")
+	fs.IntVar(&cfg.StallAtChunk, "stall-at-chunk", 0, "streams stop sending at content chunk N (from 1) until the client gives up; 0 is off")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -93,6 +95,8 @@ func check(cfg mock.Config) error {
 		return fmt.Errorf("-status must be from 400 to 599, got %d", cfg.Status)
 	case cfg.TTFT < 0 || cfg.TokenInterval < 0:
 		return errors.New("-ttft and -token-interval must not be negative")
+	case cfg.FailAtChunk < 0 || cfg.StallAtChunk < 0:
+		return errors.New("-fail-at-chunk and -stall-at-chunk must not be negative")
 	}
 	return nil
 }

@@ -60,6 +60,7 @@ func TestRunRejectsBadFlags(t *testing.T) {
 		{"-error-rate", "2"},
 		{"-status", "200"},
 		{"-ttft", "-1s"},
+		{"-fail-at-chunk", "-1"},
 		{"-unknown"},
 	} {
 		if err := run(t.Context(), args, io.Discard); err == nil {
