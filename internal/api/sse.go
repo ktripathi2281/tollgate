@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,17 +29,24 @@ func NewSSEWriter(w http.ResponseWriter) *SSEWriter {
 // because a newline inside the data would end the line early and corrupt
 // the event; JSON from encoding/json never contains one.
 func (s *SSEWriter) WriteEvent(data []byte) error {
-	// EXERCISE: implement WriteEvent; sse_test.go has every case it must pass.
-	// Hint: reject data containing '\n' first. Then write "data: ", data and "\n\n"
-	// (one Write call is simplest) and flush with s.rc.Flush(), returning either error.
-	_ = data
-	return errNotImplemented
+	if bytes.IndexByte(data, '\n') >= 0 {
+		return errors.New("event data must not contain a newline")
+	}
+	// Build the whole event first so it goes out in one Write: a client
+	// never sees half an event, even if the connection fails mid-write.
+	event := make([]byte, 0, len(data)+len("data: \n\n"))
+	event = append(event, "data: "...)
+	event = append(event, data...)
+	event = append(event, "\n\n"...)
+	if _, err := s.w.Write(event); err != nil {
+		return fmt.Errorf("write event: %w", err)
+	}
+	// The event sits in net/http's buffer until it is flushed.
+	if err := s.rc.Flush(); err != nil {
+		return fmt.Errorf("flush event: %w", err)
+	}
+	return nil
 }
-
-// errNotImplemented is what the WriteEvent stub returns. It is a variable,
-// not an inline errors.New, so linters don't conclude that WriteEvent can
-// never succeed. Delete it with the stub.
-var errNotImplemented = errors.New("WriteEvent is not implemented yet")
 
 // WriteJSON writes v, encoded as JSON, as one event.
 func (s *SSEWriter) WriteJSON(v any) error {
