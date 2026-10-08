@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -123,6 +124,64 @@ func TestServeFailsOnInvalidConfig(t *testing.T) {
 	}
 }
 
+// child is the gateway running as a separate process.
+type child struct {
+	cmd    *exec.Cmd
+	addr   string
+	logs   *json.Decoder // the rest of its JSON log, from stdout
+	stderr *bytes.Buffer
+}
+
+// startServe runs "tollgate serve" in a child process with the given config
+// and waits until it logs the address it is listening on.
+func startServe(t *testing.T, ctx context.Context, yaml string) *child {
+	t.Helper()
+	cmd := mainCommand(ctx, "serve", "--config", writeConfig(t, yaml))
+	c := &child{cmd: cmd, stderr: &bytes.Buffer{}}
+	cmd.Stderr = c.stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c.logs = json.NewDecoder(stdout)
+	for c.addr == "" {
+		var rec struct{ Msg, Addr string }
+		if err := c.logs.Decode(&rec); err != nil {
+			t.Fatalf("reading child logs: %v\nstderr:\n%s", err, c.stderr)
+		}
+		if rec.Msg == "listening" {
+			c.addr = rec.Addr
+		}
+	}
+	return c
+}
+
+// terminate sends SIGTERM, reads the rest of the log until the child
+// closes stdout, and reaps it. It returns the log messages and the error
+// from Wait (nil for exit status 0).
+func (c *child) terminate(t *testing.T) ([]string, error) {
+	t.Helper()
+	if err := c.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for {
+		var rec struct{ Msg string }
+		err := c.logs.Decode(&rec)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading child logs: %v", err)
+		}
+		msgs = append(msgs, rec.Msg)
+	}
+	return msgs, c.cmd.Wait()
+}
+
 // Acceptance (M0): SIGTERM exits cleanly.
 func TestServeExitsCleanlyOnSIGTERM(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -132,57 +191,74 @@ func TestServeExitsCleanlyOnSIGTERM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	path := writeConfig(t, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n")
-	cmd := mainCommand(ctx, "serve", "--config", path)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
+	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n")
+	checkHealthz(t, c.addr)
+
+	msgs, err := c.terminate(t)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-
-	// The child logs JSON lines. Read until it says where it's listening.
-	logs := json.NewDecoder(stdout)
-	var addr string
-	for addr == "" {
-		var rec struct{ Msg, Addr string }
-		if err := logs.Decode(&rec); err != nil {
-			t.Fatalf("reading child logs: %v\nstderr:\n%s", err, stderr.String())
-		}
-		if rec.Msg == "listening" {
-			addr = rec.Addr
-		}
-	}
-
-	checkHealthz(t, addr)
-
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-
-	// Read the remaining logs until the child closes stdout, then reap it.
-	var msgs []string
-	for {
-		var rec struct{ Msg string }
-		err := logs.Decode(&rec)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatalf("reading child logs: %v", err)
-		}
-		msgs = append(msgs, rec.Msg)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("child exited with %v, want status 0\nstderr:\n%s", err, stderr.String())
+		t.Fatalf("child exited with %v, want status 0\nstderr:\n%s", err, c.stderr)
 	}
 	for _, want := range []string{"shutting down", "shutdown complete"} {
 		if !slices.Contains(msgs, want) {
 			t.Errorf("logs after SIGTERM = %q, want them to include %q", msgs, want)
 		}
+	}
+}
+
+// Acceptance (M2), end to end: SIGTERM drains an in-flight stream. This
+// runs the real binary, with a real signal and the real clock; the
+// in-process tests in internal/server check the timing exactly.
+func TestServeDrainsStreamOnSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows can't send SIGTERM to another process")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// 10 words, 100ms apart: the stream is still running when SIGTERM lands.
+	yaml := strings.Replace(mockConfig, "output_tokens: 5", "output_tokens: 10\n    token_interval: 100ms", 1) +
+		"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 10s\n"
+	c := startServe(t, ctx, yaml)
+
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+c.addr+"/v1/chat/completions",
+		strings.NewReader(`{"model": "mock-fast", "stream": true, "messages": [{"role": "user", "content": "hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := bufio.NewScanner(resp.Body)
+	if !body.Scan() || !strings.HasPrefix(body.Text(), "data: ") {
+		t.Fatalf("no first event: %q", body.Text())
+	}
+
+	// Signal the child, then read the stream to its end while it shuts down.
+	done := make(chan []string, 1)
+	go func() {
+		var events []string
+		for body.Scan() {
+			if data, ok := strings.CutPrefix(body.Text(), "data: "); ok {
+				events = append(events, data)
+			}
+		}
+		done <- events
+	}()
+	msgs, err := c.terminate(t)
+	events := <-done
+
+	if err != nil {
+		t.Errorf("child exited with %v, want status 0\nstderr:\n%s", err, c.stderr)
+	}
+	if len(events) == 0 || events[len(events)-1] != "[DONE]" {
+		t.Errorf("the stream did not run to [DONE] during shutdown; got %q", events)
+	}
+	if !slices.Contains(msgs, "shutdown complete") {
+		t.Errorf("logs after SIGTERM = %q, want a clean shutdown", msgs)
 	}
 }
 
