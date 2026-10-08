@@ -32,8 +32,13 @@ func (s *SSEWriter) WriteEvent(data []byte) error {
 	// Hint: reject data containing '\n' first. Then write "data: ", data and "\n\n"
 	// (one Write call is simplest) and flush with s.rc.Flush(), returning either error.
 	_ = data
-	return errors.New("WriteEvent is not implemented yet")
+	return errNotImplemented
 }
+
+// errNotImplemented is what the WriteEvent stub returns. It is a variable,
+// not an inline errors.New, so linters don't conclude that WriteEvent can
+// never succeed. Delete it with the stub.
+var errNotImplemented = errors.New("WriteEvent is not implemented yet")
 
 // WriteJSON writes v, encoded as JSON, as one event.
 func (s *SSEWriter) WriteJSON(v any) error {
