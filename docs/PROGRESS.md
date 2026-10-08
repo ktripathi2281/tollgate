@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M2, streaming. Built; waiting for the maintainer's review and the M2 exercise.
+**Current milestone:** M2, streaming. Complete; waiting for the go-ahead on M3.
 
 ## Done
 
@@ -12,7 +12,7 @@
 
 ## M2 acceptance
 
-All checks pass with `WriteEvent` implemented (verified against a reference solution kept outside the repo). In the repo they fail until the exercise below is done.
+All checks pass.
 
 | Check | Test |
 |---|---|
@@ -23,11 +23,11 @@ All checks pass with `WriteEvent` implemented (verified against a reference solu
 | SIGTERM drains an in-flight stream; stragglers are cancelled after the grace period | `TestShutdownDrainsStream`, `TestShutdownCancelsStragglers` (internal/server); `TestServeDrainsStreamOnSIGTERM` (cmd/tollgate, real signal) |
 | No goroutine leaks | `goleak` in every package that starts goroutines; `synctest` also fails any test that leaves goroutines in its bubble |
 
-The manual check `scripts/openai_sdk_check.py` passed with openai 3.26.0 (2026-10-08) against a build with the reference `WriteEvent`: streaming, the usage chunk, and a mid-stream failure raised as `openai.APIError`.
+The manual check `scripts/openai_sdk_check.py` passed with openai 3.26.0 (2026-10-08): streaming, the usage chunk, and a mid-stream failure raised as `openai.APIError`.
 
 ## Next
 
-- Maintainer: implement `WriteEvent`, review M2.
+- Maintainer: review M2 and give the go-ahead for M3.
 - M3: real providers (OpenAI-compatible and Anthropic adapters), retries, fallback, circuit breakers. Needs model IDs and prices from the maintainer.
 
 ## Open questions
@@ -36,4 +36,4 @@ The manual check `scripts/openai_sdk_check.py` passed with openai 3.26.0 (2026-1
 
 ## Pending exercises
 
-- **M2: `SSEWriter.WriteEvent`** in `internal/api/sse.go`. Tests: `internal/api/sse_test.go`. Every streaming test depends on it, and so do all the M2 acceptance checks and `make test` (and CI). Until it's done, a streaming request gets its response headers and then an empty stream.
+- None. The M2 exercise (`SSEWriter.WriteEvent`) is done.
