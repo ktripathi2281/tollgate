@@ -28,9 +28,15 @@ func TestMain(m *testing.M) {
 var fixedTime = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 
 // testServer builds a Server with two aliases, "mock-fast" (default 5
-// tokens, ceiling 50) and "another", both backed by p. mutate, if not nil,
-// adjusts the server config first.
+// tokens, ceiling 50) and "another", both backed by p, and the default
+// timeouts. mutate, if not nil, adjusts the server config first.
 func testServer(t *testing.T, p provider.Provider, mutate func(*config.Server)) *Server {
+	t.Helper()
+	return testServerWith(t, p, mutate, config.Default().Timeouts)
+}
+
+// testServerWith is testServer with the given timeouts.
+func testServerWith(t *testing.T, p provider.Provider, mutate func(*config.Server), timeouts config.Timeouts) *Server {
 	t.Helper()
 	cfg := config.Server{
 		Addr:              "127.0.0.1:0",
@@ -46,11 +52,11 @@ func testServer(t *testing.T, p provider.Provider, mutate func(*config.Server)) 
 	r, err := router.New(map[string]config.Model{
 		"mock-fast": {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
 		"another":   {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
-	}, map[string]provider.Provider{p.Name(): p}, config.Default().Timeouts)
+	}, map[string]provider.Provider{p.Name(): p}, timeouts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(cfg, r, slog.New(slog.DiscardHandler))
+	s := New(cfg, timeouts, r, slog.New(slog.DiscardHandler))
 	s.now = func() time.Time { return fixedTime }
 	s.started = fixedTime
 	return s

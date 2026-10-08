@@ -119,7 +119,6 @@ func TestChatCompletionErrors(t *testing.T) {
 		{name: "invalid JSON", body: `{`, wantStatus: 400, wantCode: api.CodeInvalidJSON},
 		{name: "unsupported parameter", body: `{"model": "mock-fast", "messages": [], "tools": [{}]}`, wantStatus: 400, wantCode: api.CodeUnsupportedValue},
 		{name: "unknown model", body: `{"model": "gpt-9", "messages": [{"role": "user", "content": "hi"}]}`, wantStatus: 404, wantCode: api.CodeModelNotFound},
-		{name: "streaming not yet supported", body: `{"model": "mock-fast", "stream": true, "messages": [{"role": "user", "content": "hi"}]}`, wantStatus: 400, wantCode: api.CodeUnsupportedValue},
 		{name: "token limit above the ceiling", body: `{"model": "mock-fast", "max_tokens": 51, "messages": [{"role": "user", "content": "hi"}]}`, wantStatus: 400, wantCode: api.CodeInvalidValue},
 		{name: "upstream bad request", mock: mock.Config{Status: 400}, body: helloBody, wantStatus: 400},
 		{name: "upstream auth failure", mock: mock.Config{Status: 401}, body: helloBody, wantStatus: 502, wantCode: api.CodeUpstreamError},

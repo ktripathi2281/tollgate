@@ -44,7 +44,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("listening", "addr", ln.Addr().String())
 
-	if err := server.New(cfg.Server, r, logger).Serve(ctx, ln); err != nil {
+	if err := server.New(cfg.Server, cfg.Timeouts, r, logger).Serve(ctx, ln); err != nil {
 		return err
 	}
 	logger.Info("shutdown complete")
