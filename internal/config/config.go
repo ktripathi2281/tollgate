@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -31,6 +32,8 @@ type Config struct {
 	Server    Server              `yaml:"server"`
 	Log       Log                 `yaml:"log"`
 	Timeouts  Timeouts            `yaml:"timeouts"`
+	Retry     Retry               `yaml:"retry"`
+	Breaker   Breaker             `yaml:"breaker"`
 	Providers map[string]Provider `yaml:"providers"`
 	Models    map[string]Model    `yaml:"models"`
 	// Pricing is keyed by "provider/model"; see PriceKey.
@@ -63,8 +66,10 @@ type Log struct {
 // Timeouts bound how long an upstream call may take. They are per-request
 // deadlines, not server-wide timeouts, so long streams aren't cut off.
 type Timeouts struct {
-	// FirstToken is how long a stream may take to deliver its first
-	// content, from the moment the call starts.
+	// Connect bounds opening a TCP connection to an upstream provider.
+	Connect time.Duration `yaml:"connect"`
+	// FirstToken is how long a stream may take to produce its first token,
+	// from the moment the call starts.
 	FirstToken time.Duration `yaml:"first_token"`
 	// Idle is the longest gap allowed between stream chunks after the first
 	// content. It also bounds how long one write to a slow client may block.
@@ -74,11 +79,48 @@ type Timeouts struct {
 	Total time.Duration `yaml:"total"`
 }
 
+// Retry controls retries of a failed upstream call against the same target,
+// before the router falls back to the next one.
+type Retry struct {
+	// MaxAttemptsPerTarget is how many times a target is tried, retries
+	// included.
+	MaxAttemptsPerTarget int `yaml:"max_attempts_per_target"`
+	// BaseBackoff and MaxBackoff shape the wait before each retry of an
+	// unavailable target: exponential from BaseBackoff, capped at
+	// MaxBackoff, with full jitter.
+	BaseBackoff time.Duration `yaml:"base_backoff"`
+	MaxBackoff  time.Duration `yaml:"max_backoff"`
+	// MaxRetryAfter is the longest Retry-After from a rate-limited target
+	// that the router waits out. A longer one sends it to the next target.
+	MaxRetryAfter time.Duration `yaml:"max_retry_after"`
+}
+
+// Breaker configures the circuit breaker kept for each target.
+type Breaker struct {
+	// FailureThreshold consecutive unavailable failures open the breaker.
+	FailureThreshold int `yaml:"failure_threshold"`
+	// OpenFor is how long an open breaker skips its target before letting
+	// one probe request through.
+	OpenFor time.Duration `yaml:"open_for"`
+}
+
 // Provider configures one upstream provider. Type selects the
 // implementation, and the remaining fields belong to that type.
 type Provider struct {
-	// Type is the implementation: "mock" for now.
+	// Type is "openai" (OpenAI or any server with an OpenAI-compatible Chat
+	// Completions API), "anthropic", or "mock".
 	Type string `yaml:"type"`
+
+	// BaseURL is where the API lives, such as https://api.openai.com/v1 or
+	// https://api.anthropic.com. Types openai and anthropic only.
+	BaseURL string `yaml:"base_url"`
+	// APIKeyEnv names the environment variable holding the API key. The key
+	// itself never appears in the config. Types openai and anthropic only.
+	APIKeyEnv string `yaml:"api_key_env"`
+	// TokenParam is the request field the token limit is sent in:
+	// "max_completion_tokens" (the default) or "max_tokens", because
+	// OpenAI-compatible servers differ. Type openai only.
+	TokenParam string `yaml:"token_param"`
 
 	// The fields below configure type "mock", a fake provider that generates
 	// text locally. TTFT is the time to the first token, TokenInterval the
@@ -117,6 +159,16 @@ type Model struct {
 type Target struct {
 	Provider string `yaml:"provider"`
 	Model    string `yaml:"model"`
+	// Sampling says whether the model accepts temperature and top_p. Recent
+	// Claude models and OpenAI reasoning models reject them. Leaving it out
+	// means true.
+	Sampling *bool `yaml:"sampling"`
+}
+
+// AcceptsSampling reports whether the target's model accepts temperature
+// and top_p.
+func (t Target) AcceptsSampling() bool {
+	return t.Sampling == nil || *t.Sampling
 }
 
 // Price is a target's price in USD per million tokens. The YAML holds
@@ -165,9 +217,20 @@ func Default() *Config {
 		},
 		Log: Log{Level: "info"},
 		Timeouts: Timeouts{
+			Connect:    5 * time.Second,
 			FirstToken: 30 * time.Second,
 			Idle:       30 * time.Second,
 			Total:      300 * time.Second,
+		},
+		Retry: Retry{
+			MaxAttemptsPerTarget: 2,
+			BaseBackoff:          200 * time.Millisecond,
+			MaxBackoff:           2 * time.Second,
+			MaxRetryAfter:        2 * time.Second,
+		},
+		Breaker: Breaker{
+			FailureThreshold: 5,
+			OpenFor:          30 * time.Second,
 		},
 	}
 }
@@ -236,6 +299,7 @@ func (c *Config) validate() error {
 		p.addf("log.level", "must be one of debug, info, warn, error; got %q", c.Log.Level)
 	}
 	c.validateTimeouts(&p)
+	c.validateRetry(&p)
 	c.validateProviders(&p)
 	c.validatePricing(&p)
 	c.validateModels(&p)
@@ -271,6 +335,7 @@ func (c *Config) validateTimeouts(p *problems) {
 		field string
 		value time.Duration
 	}{
+		{"timeouts.connect", t.Connect},
 		{"timeouts.first_token", t.FirstToken},
 		{"timeouts.idle", t.Idle},
 		{"timeouts.total", t.Total},
@@ -279,13 +344,51 @@ func (c *Config) validateTimeouts(p *problems) {
 			p.addf(d.field, "must be positive, got %s", d.value)
 		}
 	}
-	if t.FirstToken > t.Total {
-		p.addf("timeouts.first_token", "must not be longer than timeouts.total (%s), got %s", t.Total, t.FirstToken)
-	}
-	if t.Idle > t.Total {
-		p.addf("timeouts.idle", "must not be longer than timeouts.total (%s), got %s", t.Total, t.Idle)
+	for _, d := range []struct {
+		field string
+		value time.Duration
+	}{
+		{"timeouts.connect", t.Connect},
+		{"timeouts.first_token", t.FirstToken},
+		{"timeouts.idle", t.Idle},
+	} {
+		if d.value > t.Total {
+			p.addf(d.field, "must not be longer than timeouts.total (%s), got %s", t.Total, d.value)
+		}
 	}
 }
+
+func (c *Config) validateRetry(p *problems) {
+	r, b := c.Retry, c.Breaker
+	if r.MaxAttemptsPerTarget < 1 {
+		p.addf("retry.max_attempts_per_target", "must be at least 1, got %d", r.MaxAttemptsPerTarget)
+	}
+	if r.BaseBackoff <= 0 {
+		p.addf("retry.base_backoff", "must be positive, got %s", r.BaseBackoff)
+	}
+	if r.MaxBackoff < r.BaseBackoff {
+		p.addf("retry.max_backoff", "must be at least retry.base_backoff (%s), got %s", r.BaseBackoff, r.MaxBackoff)
+	}
+	if r.MaxRetryAfter < 0 {
+		p.addf("retry.max_retry_after", "must not be negative, got %s", r.MaxRetryAfter)
+	}
+	if b.FailureThreshold < 1 {
+		p.addf("breaker.failure_threshold", "must be at least 1, got %d", b.FailureThreshold)
+	}
+	if b.OpenFor <= 0 {
+		p.addf("breaker.open_for", "must be positive, got %s", b.OpenFor)
+	}
+}
+
+// Provider types, and the token parameters an openai provider can send.
+const (
+	TypeOpenAI    = "openai"
+	TypeAnthropic = "anthropic"
+	TypeMock      = "mock"
+
+	TokenParamMaxCompletionTokens = "max_completion_tokens"
+	TokenParamMaxTokens           = "max_tokens"
+)
 
 func (c *Config) validateProviders(p *problems) {
 	if len(c.Providers) == 0 {
@@ -298,14 +401,55 @@ func (c *Config) validateProviders(p *problems) {
 			p.addf(field, "%v", err)
 		}
 		switch prov.Type {
-		case "mock":
+		case TypeOpenAI, TypeAnthropic:
+			checkHTTPProvider(p, field, prov)
+		case TypeMock:
 			checkMock(p, field, prov)
 		case "":
 			p.addf(field+".type", "is required")
 		default:
-			p.addf(field+".type", `must be "mock", got %q`, prov.Type)
+			p.addf(field+".type", `must be "openai", "anthropic" or "mock", got %q`, prov.Type)
 		}
 	}
+}
+
+// checkHTTPProvider checks a provider that is called over HTTP.
+func checkHTTPProvider(p *problems, field string, prov Provider) {
+	if err := checkBaseURL(prov.BaseURL); err != nil {
+		p.addf(field+".base_url", "%v", err)
+	}
+	if prov.APIKeyEnv == "" {
+		p.addf(field+".api_key_env", "is required: name the environment variable that holds the API key")
+	}
+	switch {
+	case prov.Type == TypeAnthropic && prov.TokenParam != "":
+		p.addf(field+".token_param", "applies to type openai only")
+	case prov.Type == TypeOpenAI && prov.TokenParam != "" &&
+		prov.TokenParam != TokenParamMaxCompletionTokens && prov.TokenParam != TokenParamMaxTokens:
+		p.addf(field+".token_param", "must be %q or %q, got %q",
+			TokenParamMaxCompletionTokens, TokenParamMaxTokens, prov.TokenParam)
+	}
+	if prov.hasMockSettings() {
+		p.addf(field, "mock settings (ttft, output_tokens and so on) apply to type mock only")
+	}
+}
+
+// hasMockSettings reports whether any mock-only field is set.
+func (prov Provider) hasMockSettings() bool {
+	return prov.TTFT != 0 || prov.TokenInterval != 0 || prov.OutputTokens != 0 || prov.ErrorRate != 0 ||
+		prov.Status != 0 || prov.Hang || prov.Seed != 0 || prov.FailAtChunk != 0 || prov.StallAtChunk != 0
+}
+
+// checkBaseURL accepts an absolute http or https URL.
+func checkBaseURL(raw string) error {
+	if raw == "" {
+		return errors.New("is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("must be an absolute http or https URL, got %q", raw)
+	}
+	return nil
 }
 
 func checkMock(p *problems, field string, prov Provider) {
@@ -329,6 +473,9 @@ func checkMock(p *problems, field string, prov Provider) {
 	}
 	if prov.StallAtChunk < 0 {
 		p.addf(field+".stall_at_chunk", "must not be negative, got %d", prov.StallAtChunk)
+	}
+	if prov.BaseURL != "" || prov.APIKeyEnv != "" || prov.TokenParam != "" {
+		p.addf(field, "base_url, api_key_env and token_param don't apply to type mock")
 	}
 }
 

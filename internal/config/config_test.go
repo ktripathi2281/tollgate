@@ -82,7 +82,7 @@ timeouts:
 `,
 			want: func() config.Config {
 				c := minimalConfig()
-				c.Timeouts = config.Timeouts{FirstToken: 5 * time.Second, Idle: 2 * time.Second, Total: time.Minute}
+				c.Timeouts = config.Timeouts{Connect: 5 * time.Second, FirstToken: 5 * time.Second, Idle: 2 * time.Second, Total: time.Minute}
 				c.Server = config.Server{
 					Addr:              "127.0.0.1:9090",
 					ShutdownGrace:     5 * time.Second,
@@ -247,10 +247,10 @@ func TestParseRejects(t *testing.T) {
 		},
 		{
 			name: "unknown provider type",
-			yaml: strings.Replace(minimal, "type: mock", "type: openai", 1),
+			yaml: strings.Replace(minimal, "type: mock", "type: bedrock", 1),
 			// The model's target still points at the provider, so only the
 			// type is reported.
-			wantInError: []string{"providers.mock.type", `got "openai"`},
+			wantInError: []string{"providers.mock.type", `got "bedrock"`},
 		},
 		{
 			name:        "missing provider type",
