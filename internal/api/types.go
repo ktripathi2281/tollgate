@@ -43,8 +43,9 @@ type Usage struct {
 }
 
 // NewChatCompletion builds the response for a provider result. id is the
-// gateway's own completion ID, and created is when the request arrived.
-func NewChatCompletion(id string, created time.Time, resp *provider.ChatResponse) ChatCompletion {
+// gateway's own completion ID, created is when the request arrived, and u
+// is the usage to report: the provider's, or the gateway's estimate.
+func NewChatCompletion(id string, created time.Time, resp *provider.ChatResponse, u provider.Usage) ChatCompletion {
 	return ChatCompletion{
 		ID:      id,
 		Object:  "chat.completion",
@@ -56,9 +57,9 @@ func NewChatCompletion(id string, created time.Time, resp *provider.ChatResponse
 			FinishReason: string(resp.FinishReason),
 		}},
 		Usage: Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.PromptTokens + resp.Usage.CompletionTokens,
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.PromptTokens + u.CompletionTokens,
 		},
 	}
 }

@@ -94,7 +94,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp))
+	u, _ := usageOrEstimate(resp.Usage, creq, resp.Content)
+	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp, u))
 }
 
 // errShuttingDown is the cause given to every request context still running

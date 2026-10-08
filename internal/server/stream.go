@@ -53,7 +53,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		finish   provider.FinishReason
 	)
 	summary := func(outcome string) {
-		u, estimated := streamUsage(reported, req, reply.String())
+		u, estimated := usageOrEstimate(reported, req, reply.String())
 		s.log.InfoContext(ctx, "stream ended",
 			slog.String("request_id", RequestID(ctx)),
 			slog.String("provider", result.Provider),
@@ -115,7 +115,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		return
 	}
 	if includeUsage {
-		u, _ := streamUsage(reported, req, reply.String())
+		u, _ := usageOrEstimate(reported, req, reply.String())
 		if out.send(chunks.Usage(u)) != nil {
 			summary("client_gone")
 			return
@@ -157,10 +157,10 @@ func (e *eventSender) clearDeadline() {
 	_ = e.sse.SetWriteDeadline(time.Time{})
 }
 
-// streamUsage returns the provider's token counts, or estimates them when
-// it reported none: an interrupted stream, or a provider that doesn't send
-// usage. The second result says whether the counts are estimates.
-func streamUsage(reported *provider.Usage, req provider.ChatRequest, reply string) (provider.Usage, bool) {
+// usageOrEstimate returns the provider's token counts, or estimates them
+// when it reported none: an interrupted stream, or a provider that doesn't
+// send usage. The second result says whether the counts are estimates.
+func usageOrEstimate(reported *provider.Usage, req provider.ChatRequest, reply string) (provider.Usage, bool) {
 	if reported != nil {
 		return *reported, false
 	}

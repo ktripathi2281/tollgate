@@ -46,10 +46,16 @@ type Chunk struct {
 	// Usage is set when the provider reports token counts, on or after the
 	// chunk that ends the reply.
 	Usage *Usage
+	// Reasoning means the model produced output the client doesn't see,
+	// such as Claude's thinking. It shows the model is working: it counts
+	// as the first token for the first-token timeout, but it doesn't commit
+	// the stream, because the client has nothing yet.
+	Reasoning bool
 }
 
-// IsKeepalive reports whether c carries nothing but signs of life, such as
-// an Anthropic ping. Keepalives reset the idle timeout and are not sent on.
+// IsKeepalive reports whether c carries nothing to send the client: a
+// ping, hidden reasoning, or an event the gateway doesn't model. Keepalives
+// reset the idle timeout and are not sent on.
 func (c *Chunk) IsKeepalive() bool {
 	return c.Delta == "" && c.FinishReason == "" && c.Usage == nil
 }
@@ -109,5 +115,19 @@ type ChatResponse struct {
 	Model        string
 	Content      string
 	FinishReason FinishReason
-	Usage        Usage
+	// Usage is nil if the provider reported no token counts; the gateway
+	// then estimates them.
+	Usage *Usage
+}
+
+// ParamError says a request can't be sent to a provider as it is, because
+// of a rule particular to that provider, such as Anthropic's narrower
+// temperature range. Adapters return it from Validate.
+type ParamError struct {
+	Param   string // the client's parameter, such as "temperature"
+	Message string
+}
+
+func (e *ParamError) Error() string {
+	return e.Param + ": " + e.Message
 }

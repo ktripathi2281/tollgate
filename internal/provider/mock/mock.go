@@ -94,7 +94,7 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 		Model:        req.Model,
 		Content:      p.text(n),
 		FinishReason: finish,
-		Usage: provider.Usage{
+		Usage: &provider.Usage{
 			PromptTokens:     usage.EstimatePrompt(req.Messages),
 			CompletionTokens: n,
 		},

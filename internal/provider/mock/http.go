@@ -75,7 +75,7 @@ func handleChat(w http.ResponseWriter, r *http.Request, p *Provider) {
 		writeProviderError(w, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-mock-"+rand.Text(), time.Now(), resp))
+	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-mock-"+rand.Text(), time.Now(), resp, *resp.Usage))
 }
 
 // streamChat answers with server-sent events in OpenAI's format: a role

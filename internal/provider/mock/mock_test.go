@@ -50,7 +50,7 @@ func TestChatReply(t *testing.T) {
 				t.Errorf("reply has %d words, want %d: %q", got, tt.wantTokens, resp.Content)
 			}
 			want := provider.Usage{PromptTokens: 6, CompletionTokens: tt.wantTokens}
-			if resp.Usage != want {
+			if resp.Usage == nil || *resp.Usage != want {
 				t.Errorf("Usage = %+v, want %+v", resp.Usage, want)
 			}
 			if resp.FinishReason != tt.wantFinish {

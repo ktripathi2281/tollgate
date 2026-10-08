@@ -163,7 +163,7 @@ func (g *gate) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.C
 	}
 	return &provider.ChatResponse{
 		Model: req.Model, Content: "ok", FinishReason: provider.FinishStop,
-		Usage: provider.Usage{PromptTokens: 1, CompletionTokens: 1},
+		Usage: &provider.Usage{PromptTokens: 1, CompletionTokens: 1},
 	}, nil
 }
 
