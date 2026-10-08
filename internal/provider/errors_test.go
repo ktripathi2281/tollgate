@@ -14,8 +14,10 @@ func TestClassifyStatus(t *testing.T) {
 	}{
 		{400, BadRequest},
 		{401, AuthOrConfig},
+		{402, AuthOrConfig}, // billing
 		{403, AuthOrConfig},
-		{404, BadRequest},
+		{404, AuthOrConfig}, // a model ID the gateway sent doesn't exist
+		{409, BadRequest},
 		{413, BadRequest},
 		{422, BadRequest},
 		{429, RateLimited},

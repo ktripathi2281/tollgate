@@ -22,9 +22,10 @@ const (
 	// BadRequest: any other 4xx. Return it to the client; no retry, no
 	// fallback.
 	BadRequest
-	// AuthOrConfig: 401 or 403 from upstream, meaning the gateway's own key
-	// or config is wrong. Fall back and log loudly; never show the client
-	// the upstream detail.
+	// AuthOrConfig: the gateway's own key, account or config is wrong. 401
+	// and 403, and also 402 (billing) and 404 (an unknown model ID), since
+	// those are never the client's fault: the model is the gateway's choice.
+	// Fall back and log loudly; never show the client the upstream detail.
 	AuthOrConfig
 	// Cancelled: the client went away. Stop everything; it isn't a failure.
 	Cancelled
@@ -83,7 +84,8 @@ func ClassifyStatus(status int) Class {
 	switch {
 	case status == http.StatusTooManyRequests:
 		return RateLimited
-	case status == http.StatusUnauthorized, status == http.StatusForbidden:
+	case status == http.StatusUnauthorized, status == http.StatusForbidden,
+		status == http.StatusPaymentRequired, status == http.StatusNotFound:
 		return AuthOrConfig
 	case status >= 400 && status < 500:
 		return BadRequest
