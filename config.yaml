@@ -15,6 +15,14 @@ server:
 log:
   level: info
 
+# Per-request deadlines for upstream calls. first_token runs until a
+# stream's first content; idle is the longest gap between chunks after
+# that; total covers the whole request.
+timeouts:
+  first_token: 30s
+  idle: 30s
+  total: 300s
+
 providers:
   # A fake provider that generates text locally, so the gateway works
   # without any provider keys.
