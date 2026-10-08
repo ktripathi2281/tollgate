@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
+	"strconv"
 )
 
 // WriteJSON writes v as a JSON response with the given status. It encodes
@@ -23,8 +25,11 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(body)
 }
 
-// WriteError writes e as an OpenAI error response. Callers set any extra
-// headers, such as Retry-After, before calling it.
+// WriteError writes e as an OpenAI error response, with a Retry-After
+// header if e has one.
 func WriteError(w http.ResponseWriter, e *Error) {
+	if e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(e.RetryAfter.Seconds()))))
+	}
 	WriteJSON(w, e.Status, e.Envelope())
 }

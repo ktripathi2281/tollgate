@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/api"
@@ -156,8 +155,5 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	if perr.Status >= 500 {
 		typ = api.TypeServer
 	}
-	if perr.RetryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(perr.RetryAfter.Seconds())))
-	}
-	api.WriteError(w, &api.Error{Status: perr.Status, Type: typ, Message: perr.Message})
+	api.WriteError(w, &api.Error{Status: perr.Status, Type: typ, Message: perr.Message, RetryAfter: perr.RetryAfter})
 }

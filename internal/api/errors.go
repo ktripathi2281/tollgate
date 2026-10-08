@@ -2,7 +2,10 @@
 // parsing and validation, response types, and the error envelope.
 package api
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Error types, using OpenAI's names.
 const (
@@ -26,6 +29,7 @@ const (
 	CodeUpstreamError        = "upstream_error"
 	CodeUpstreamTimeout      = "upstream_timeout"
 	CodeUpstreamRateLimited  = "upstream_rate_limited"
+	CodeShuttingDown         = "shutting_down"
 	CodeInternal             = "internal_error"
 )
 
@@ -36,6 +40,9 @@ type Error struct {
 	Code    string // empty is sent as null
 	Param   string // empty is sent as null
 	Message string
+	// RetryAfter, if positive, is sent as a Retry-After header (rounded up
+	// to whole seconds). It is not part of the JSON body.
+	RetryAfter time.Duration
 }
 
 func (e *Error) Error() string {

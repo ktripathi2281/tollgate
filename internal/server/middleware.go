@@ -143,12 +143,12 @@ func limitInflight(max int, next http.Handler) http.Handler {
 			defer func() { <-slots }()
 			next.ServeHTTP(w, r)
 		default:
-			w.Header().Set("Retry-After", "1")
 			api.WriteError(w, &api.Error{
-				Status:  http.StatusServiceUnavailable,
-				Type:    api.TypeServer,
-				Code:    api.CodeOverloaded,
-				Message: "The gateway is handling too many requests. Retry shortly.",
+				Status:     http.StatusServiceUnavailable,
+				Type:       api.TypeServer,
+				Code:       api.CodeOverloaded,
+				Message:    "The gateway is handling too many requests. Retry shortly.",
+				RetryAfter: time.Second,
 			})
 		}
 	})
