@@ -22,6 +22,8 @@ func buildProviders(cfgs map[string]config.Provider) (map[string]provider.Provid
 				Status:        c.Status,
 				Hang:          c.Hang,
 				Seed:          c.Seed,
+				FailAtChunk:   c.FailAtChunk,
+				StallAtChunk:  c.StallAtChunk,
 			})
 		default:
 			// Config validation rejects unknown types, so this is a bug.

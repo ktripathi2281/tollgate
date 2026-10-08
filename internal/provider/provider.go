@@ -15,6 +15,43 @@ type Provider interface {
 	// Chat sends a request and waits for the complete response. It returns
 	// an error that ClassOf can classify.
 	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
+	// ChatStream starts a streaming call and returns once the upstream has
+	// accepted it (for HTTP, once the response headers arrive). The content
+	// comes from the returned Stream. ctx bounds the whole stream, not just
+	// this call: cancelling it ends the stream.
+	ChatStream(ctx context.Context, req *ChatRequest) (Stream, error)
+}
+
+// Stream is an open streaming response. Next and Close are called from one
+// goroutine; to interrupt a blocked Next from elsewhere, cancel the context
+// the stream was opened with.
+type Stream interface {
+	// Next returns the next chunk, or io.EOF after the last one. It blocks
+	// until a chunk arrives or the stream's context is done. Any other
+	// error ends the stream and can be classified with ClassOf.
+	Next() (*Chunk, error)
+	// Close releases the stream. It is safe to call more than once, and
+	// after Next has returned an error.
+	Close() error
+}
+
+// Chunk is one piece of a streamed response.
+type Chunk struct {
+	// Model is the upstream model, if the provider reported it here.
+	Model string
+	// Delta is the next piece of the reply's text.
+	Delta string
+	// FinishReason is set on the chunk that ends the reply.
+	FinishReason FinishReason
+	// Usage is set when the provider reports token counts, on or after the
+	// chunk that ends the reply.
+	Usage *Usage
+}
+
+// IsKeepalive reports whether c carries nothing but signs of life, such as
+// an Anthropic ping. Keepalives reset the idle timeout and are not sent on.
+func (c *Chunk) IsKeepalive() bool {
+	return c.Delta == "" && c.FinishReason == "" && c.Usage == nil
 }
 
 // Role is the author of a message.

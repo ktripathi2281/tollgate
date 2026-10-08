@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -158,4 +159,8 @@ func (g *gate) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.C
 		Model: req.Model, Content: "ok", FinishReason: provider.FinishStop,
 		Usage: provider.Usage{PromptTokens: 1, CompletionTokens: 1},
 	}, nil
+}
+
+func (g *gate) ChatStream(context.Context, *provider.ChatRequest) (provider.Stream, error) {
+	return nil, errors.New("gate: streaming is not used in these tests")
 }
