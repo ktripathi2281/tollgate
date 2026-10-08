@@ -76,16 +76,37 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "pipe" }
 func (pipeAddr) String() string  { return "pipe" }
 
-// serveOnPipe runs s on an in-memory listener. Cancel the returned context
-// to start a shutdown, as SIGTERM does in main; the channel receives
-// Serve's result.
-func serveOnPipe(t *testing.T, s *Server) (*pipeListener, context.CancelFunc, <-chan error) {
+// pipeServer is a Server running on an in-memory listener.
+type pipeServer struct {
+	ln     *pipeListener
+	client *http.Client
+	stop   context.CancelFunc // starts a shutdown, as SIGTERM does in main
+	result chan error
+	once   sync.Once
+	err    error
+}
+
+// serveOnPipe runs s on an in-memory listener and returns a client for it.
+// A cleanup shuts the server down, so a test that fails part-way still
+// leaves no goroutines in its synctest bubble.
+func serveOnPipe(t *testing.T, s *Server) *pipeServer {
 	t.Helper()
 	ln := newPipeListener()
 	ctx, stop := context.WithCancel(t.Context())
-	served := make(chan error, 1)
-	go func() { served <- s.Serve(ctx, ln) }()
-	return ln, stop, served
+	ps := &pipeServer{ln: ln, client: ln.client(), stop: stop, result: make(chan error, 1)}
+	go func() { ps.result <- s.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		ps.client.CloseIdleConnections()
+		ps.stop()
+		_ = ps.wait()
+	})
+	return ps
+}
+
+// wait returns Serve's result once it has returned.
+func (ps *pipeServer) wait() error {
+	ps.once.Do(func() { ps.err = <-ps.result })
+	return ps.err
 }
 
 // eventReader reads server-sent events one at a time.
@@ -145,6 +166,7 @@ func postStream(t *testing.T, client *http.Client, body string) *http.Response {
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -382,11 +404,10 @@ func TestStreamFailureAfterCommitIsAnErrorEvent(t *testing.T) {
 func TestStreamEventsArriveOneAtATime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := mock.New("mock", mock.Config{TTFT: 100 * time.Millisecond, TokenInterval: 50 * time.Millisecond, OutputTokens: 3})
-		ln, stop, served := serveOnPipe(t, testServer(t, p, nil))
-		client := ln.client()
+		ps := serveOnPipe(t, testServer(t, p, nil))
 
 		start := time.Now()
-		resp := postStream(t, client, streamBody(""))
+		resp := postStream(t, ps.client, streamBody(""))
 		events := newEventReader(resp.Body)
 
 		// The role and first word go out together at the first token, then
@@ -418,9 +439,9 @@ func TestStreamEventsArriveOneAtATime(t *testing.T) {
 		}
 
 		_ = resp.Body.Close()
-		client.CloseIdleConnections()
-		stop()
-		if err := <-served; err != nil {
+		ps.client.CloseIdleConnections()
+		ps.stop()
+		if err := ps.wait(); err != nil {
 			t.Errorf("Serve = %v, want nil", err)
 		}
 	})
@@ -471,19 +492,18 @@ func TestShutdownDrainsStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := mock.New("mock", mock.Config{TTFT: time.Second, TokenInterval: time.Second, OutputTokens: 5})
 		s := testServer(t, p, func(c *config.Server) { c.ShutdownGrace = 30 * time.Second })
-		ln, stop, served := serveOnPipe(t, s)
-		client := ln.client()
+		ps := serveOnPipe(t, s)
 
 		start := time.Now()
-		resp := postStream(t, client, streamBody(""))
+		resp := postStream(t, ps.client, streamBody(""))
 		events := newEventReader(resp.Body)
 		if _, err := events.next(); err != nil { // the role, at 1s
 			t.Fatal(err)
 		}
 
-		stop() // what SIGTERM does in main
+		ps.stop() // what SIGTERM does in main
 		synctest.Wait()
-		if _, err := ln.dial(t.Context(), "", ""); err == nil {
+		if _, err := ps.ln.dial(t.Context(), "", ""); err == nil {
 			t.Error("a new connection was accepted after shutdown began")
 		}
 
@@ -495,8 +515,8 @@ func TestShutdownDrainsStream(t *testing.T) {
 			t.Errorf("stream ended after %v, want 5s: it should run to the end", elapsed)
 		}
 		_ = resp.Body.Close()
-		client.CloseIdleConnections()
-		if err := <-served; err != nil {
+		ps.client.CloseIdleConnections()
+		if err := ps.wait(); err != nil {
 			t.Errorf("Serve = %v, want nil after a full drain", err)
 		}
 	})
@@ -509,15 +529,14 @@ func TestShutdownCancelsStragglers(t *testing.T) {
 		p := mock.New("mock", mock.Config{TTFT: time.Second, TokenInterval: 700 * time.Millisecond, OutputTokens: 100})
 		p.OnCancel = func() { upstreamCancelled = true }
 		s := testServer(t, p, func(c *config.Server) { c.ShutdownGrace = 2500 * time.Millisecond })
-		ln, stop, served := serveOnPipe(t, s)
-		client := ln.client()
+		ps := serveOnPipe(t, s)
 
-		resp := postStream(t, client, streamBody(""))
+		resp := postStream(t, ps.client, streamBody(""))
 		events := newEventReader(resp.Body)
 		if _, err := events.next(); err != nil { // the role, at 1s
 			t.Fatal(err)
 		}
-		stop()
+		ps.stop()
 		shutdownAt := time.Now()
 
 		// Words keep coming for the 2.5s grace period, then the stream ends
@@ -539,8 +558,8 @@ func TestShutdownCancelsStragglers(t *testing.T) {
 			t.Error("the upstream call was not cancelled")
 		}
 		_ = resp.Body.Close()
-		client.CloseIdleConnections()
-		if err := <-served; err == nil {
+		ps.client.CloseIdleConnections()
+		if err := ps.wait(); err == nil {
 			t.Error("Serve = nil, want an error: requests had to be cancelled")
 		}
 	})
@@ -564,10 +583,10 @@ func TestStreamCutsOffAStuckClient(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := &ctxRecorder{Provider: mock.New("mock", mock.Config{TokenInterval: 10 * time.Millisecond, OutputTokens: 100000})}
 		timeouts := config.Timeouts{FirstToken: time.Second, Idle: time.Second, Total: time.Hour}
-		ln, stop, served := serveOnPipe(t, testServerWith(t, p, nil, timeouts))
-		client := ln.client()
+		ps := serveOnPipe(t, testServerWith(t, p, nil, timeouts))
 
-		resp := postStream(t, client, streamBody(""))
+		resp := postStream(t, ps.client, streamBody(""))
+		defer resp.Body.Close()
 		if _, err := newEventReader(resp.Body).next(); err != nil {
 			t.Fatal(err)
 		}
@@ -577,10 +596,5 @@ func TestStreamCutsOffAStuckClient(t *testing.T) {
 		if p.ctx.Err() == nil {
 			t.Error("the upstream stream is still open 5s after the client stopped reading")
 		}
-
-		_ = resp.Body.Close()
-		client.CloseIdleConnections()
-		stop()
-		<-served
 	})
 }

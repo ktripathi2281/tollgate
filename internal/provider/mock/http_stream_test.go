@@ -53,7 +53,7 @@ func TestHandlerStream(t *testing.T) {
 	}
 	// role, 3 words, finish, usage, [DONE]
 	if len(events) != 7 || events[6] != "[DONE]" {
-		t.Fatalf("got %d events ending %q, want 7 ending [DONE]:\n%s", len(events), events[len(events)-1], strings.Join(events, "\n"))
+		t.Fatalf("got %d events, want 7 ending in [DONE]:\n%s", len(events), strings.Join(events, "\n"))
 	}
 	chunks := make([]api.ChatCompletionChunk, 6)
 	for i := range chunks {
