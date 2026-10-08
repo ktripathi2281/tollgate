@@ -68,7 +68,7 @@ func TestHandlerErrors(t *testing.T) {
 		wantRetryAfter string
 	}{
 		{"invalid JSON", Config{OutputTokens: 1}, `{`, 400, api.TypeInvalidRequest, ""},
-		{"streaming not implemented", Config{OutputTokens: 1}, `{"model": "m", "messages": [], "stream": true}`, 400, api.TypeInvalidRequest, ""},
+		{"forced status on a stream", Config{OutputTokens: 1, Status: 503}, `{"model": "m", "messages": [], "stream": true}`, 503, api.TypeServer, ""},
 		{"forced 429", Config{OutputTokens: 1, Status: 429}, `{"model": "m", "messages": []}`, 429, api.TypeInvalidRequest, "1"},
 		{"forced 503", Config{OutputTokens: 1, Status: 503}, `{"model": "m", "messages": []}`, 503, api.TypeServer, ""},
 	}
