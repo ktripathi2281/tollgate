@@ -29,24 +29,26 @@ func readEvents(t *testing.T, body io.Reader) []string {
 	return events
 }
 
-func streamFrom(t *testing.T, cfg Config, body string) (*http.Response, []string) {
+// streamFrom sends body to a mock server built from cfg and returns the
+// response headers and the events that arrived.
+func streamFrom(t *testing.T, cfg Config, body string) (http.Header, []string) {
 	t.Helper()
 	srv := httptest.NewServer(Handler(New("mock", cfg)))
 	t.Cleanup(srv.Close)
 	resp := post(t, t.Context(), srv, body)
 	defer resp.Body.Close()
-	return resp, readEvents(t, resp.Body)
+	return resp.Header, readEvents(t, resp.Body)
 }
 
 func TestHandlerStream(t *testing.T) {
-	resp, events := streamFrom(t, Config{OutputTokens: 3, Seed: 1}, `{
+	header, events := streamFrom(t, Config{OutputTokens: 3, Seed: 1}, `{
 		"model": "mock-1",
 		"messages": [{"role": "user", "content": "Hello there"}],
 		"stream": true,
 		"stream_options": {"include_usage": true}
 	}`)
 
-	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+	if ct := header.Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
 	}
 	// role, 3 words, finish, usage, [DONE]
