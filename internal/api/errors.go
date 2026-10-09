@@ -29,6 +29,7 @@ const (
 	CodeUpstreamError        = "upstream_error"
 	CodeUpstreamTimeout      = "upstream_timeout"
 	CodeUpstreamRateLimited  = "upstream_rate_limited"
+	CodeUpstreamUnavailable  = "upstream_unavailable"
 	CodeShuttingDown         = "shutting_down"
 	CodeInternal             = "internal_error"
 )

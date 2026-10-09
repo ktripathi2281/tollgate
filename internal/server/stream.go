@@ -23,6 +23,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 	ctx := r.Context()
 
 	stream, result, err := s.router.ChatStream(ctx, alias, req)
+	s.logTries(ctx, alias.Name, result, err)
 	w.Header().Set(HeaderProvider, result.Provider)
 	w.Header().Set(HeaderAttempts, strconv.Itoa(result.Attempts))
 	if err != nil {

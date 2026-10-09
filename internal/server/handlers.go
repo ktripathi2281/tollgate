@@ -13,6 +13,7 @@ import (
 
 	"github.com/ktripathi2281/tollgate/internal/api"
 	"github.com/ktripathi2281/tollgate/internal/provider"
+	"github.com/ktripathi2281/tollgate/internal/router"
 )
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -85,6 +86,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, result, err := s.router.Chat(r.Context(), alias, creq)
+	s.logTries(r.Context(), alias.Name, result, err)
 	w.Header().Set(HeaderProvider, result.Provider)
 	w.Header().Set(HeaderAttempts, strconv.Itoa(result.Attempts))
 	if err != nil {
@@ -103,11 +105,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 var errShuttingDown = errors.New("the gateway is shutting down")
 
 // upstreamError turns a failed upstream call into the error to send the
-// client, according to its class (brief section 6). It returns nil when the
-// client has gone, since there is nobody left to tell. Details go to the
-// log; the client gets a generic message, except for a bad request, which is
-// about the client's own input.
+// client (brief sections 6 and 7). It returns nil when the client has gone,
+// since there is nobody left to tell. The client gets a generic message,
+// except when the problem is its own request; the detail is in the log.
 func (s *Server) upstreamError(ctx context.Context, err error) *api.Error {
+	// The request can't go to one of the alias's targets as it is.
+	if verr, ok := errors.AsType[*router.InvalidRequestError](err); ok {
+		return &api.Error{
+			Status: http.StatusBadRequest, Type: api.TypeInvalidRequest, Code: api.CodeInvalidValue,
+			Param: verr.Param, Message: fmt.Sprintf("Model `%s` can't take this request: %s", verr.Alias, verr.Message),
+		}
+	}
+
 	class := provider.ClassOf(err)
 	if class == provider.Cancelled {
 		if errors.Is(context.Cause(ctx), errShuttingDown) {
@@ -116,17 +125,40 @@ func (s *Server) upstreamError(ctx context.Context, err error) *api.Error {
 				Message: "The gateway is shutting down. Retry the request.", RetryAfter: time.Second,
 			}
 		}
-		s.log.InfoContext(ctx, "client went away", "request_id", RequestID(ctx))
 		return nil
 	}
 
-	level := slog.LevelWarn
-	if class == provider.AuthOrConfig {
-		level = slog.LevelError // the gateway's own key or config is wrong
+	// Every target failed or was skipped. Capacity problems, an open
+	// breaker or a rate limit, can clear up, so they are a 503 with a hint
+	// of when; an outright failure is a 502, or a 504 if time ran out.
+	if ex, ok := errors.AsType[*router.ExhaustedError](err); ok {
+		switch {
+		case ex.CapacityOnly:
+			apiErr := &api.Error{
+				Status: http.StatusServiceUnavailable, Type: api.TypeServer, Code: api.CodeUpstreamUnavailable,
+				Message:    "Every upstream provider for this model is unavailable right now. Retry later.",
+				RetryAfter: max(ex.RetryAfter, time.Second),
+			}
+			if ex.RateLimited {
+				apiErr.Code = api.CodeUpstreamRateLimited
+				apiErr.Message = "Every upstream provider for this model is rate limited. Retry later."
+			}
+			return apiErr
+		case errors.Is(ex.Last, context.DeadlineExceeded):
+			return &api.Error{
+				Status: http.StatusGatewayTimeout, Type: api.TypeServer, Code: api.CodeUpstreamTimeout,
+				Message: "The upstream provider timed out.",
+			}
+		default:
+			return &api.Error{
+				Status: http.StatusBadGateway, Type: api.TypeServer, Code: api.CodeUpstreamError,
+				Message: "The upstream provider failed.",
+			}
+		}
 	}
-	s.log.Log(ctx, level, "upstream call failed",
-		"request_id", RequestID(ctx), "class", class.String(), "error", err)
 
+	// A single upstream error: a bad request, which the router never
+	// retries, or a stream that failed after the commit point.
 	perr, _ := errors.AsType[*provider.Error](err)
 	switch {
 	case class == provider.BadRequest && perr != nil:
@@ -154,6 +186,34 @@ func (s *Server) upstreamError(ctx context.Context, err error) *api.Error {
 			Message: "The upstream provider failed.",
 		}
 	}
+}
+
+// logTries logs the router's per-attempt story when there is one worth
+// telling: a failure, or a success that took more than one try. Any target
+// with an auth or config problem is logged at error level, even if a
+// fallback saved the request: the gateway's own key or model ID is wrong.
+func (s *Server) logTries(ctx context.Context, alias string, res router.Result, err error) {
+	if provider.ClassOf(err) == provider.Cancelled && err != nil {
+		s.log.InfoContext(ctx, "client went away", "request_id", RequestID(ctx))
+		return
+	}
+	if err == nil && len(res.Tries) <= 1 {
+		return
+	}
+	level, msg := slog.LevelInfo, "upstream recovered"
+	if err != nil {
+		level, msg = slog.LevelWarn, "upstream failed"
+	}
+	for _, try := range res.Tries {
+		if try.Outcome == provider.AuthOrConfig.String() {
+			level = slog.LevelError
+		}
+	}
+	attrs := []any{"request_id", RequestID(ctx), "model", alias, "attempts", res.Attempts, "tries", res.Tries}
+	if err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	s.log.Log(ctx, level, msg, attrs...)
 }
 
 // handleModels serves GET /v1/models: the configured aliases.
