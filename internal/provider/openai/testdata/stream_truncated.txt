@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-Bx2fT","object":"chat.completion.chunk","created":1791450000,"model":"gpt-x-2026-09-01","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Bx2fT","object":"chat.completion.chunk","created":1791450000,"model":"gpt-x-2026-09-01","choices":[{"index":0,"delta":{"content":"Cut"},"finish_reason":null}]}
+

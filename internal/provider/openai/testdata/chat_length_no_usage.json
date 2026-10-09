@@ -1,0 +1,9 @@
+{
+  "id": "chatcmpl-local-1",
+  "object": "chat.completion",
+  "created": 1791450000,
+  "model": "llama-local",
+  "choices": [
+    { "index": 0, "message": { "role": "assistant", "content": "One two three" }, "finish_reason": "length" }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "chatcmpl-Bx2fRefusal",
+  "object": "chat.completion",
+  "created": 1791450000,
+  "model": "gpt-x-2026-09-01",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": null, "refusal": "I can't help with that." },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26 }
+}
