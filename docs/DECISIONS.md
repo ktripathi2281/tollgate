@@ -205,3 +205,92 @@ Inside messages, roles `system`, `developer`, `user` and `assistant` are support
 - **Timing tests run in `testing/synctest` over an in-memory `net.Pipe` network,** so the real `http.Server` and `http.Client` run on the fake clock. That makes "each event arrives when it's written" checkable to the millisecond, with no real sleeps. The disconnect test uses real TCP and the real clock instead, because it measures how fast net/http notices a closed connection. The SIGTERM drain test runs the real binary.
 - **An exercise stub returns a package-level error variable,** not an inline `errors.New`, so staticcheck can't conclude that callers' error checks are dead code.
 - **The mock gained `fail_at_chunk` and `stall_at_chunk`** for error events and stalls at a chosen point in a stream. `hang` still blocks before any response, the way unreturned response headers would.
+
+## 26. Adapters on raw net/http, one client per provider (M3)
+
+**Context.** The brief rules out provider SDKs, `http.DefaultClient` and a blanket client timeout.
+
+**Decision.** Each real provider gets its own `http.Client` from `provider.NewHTTPClient`, so each has its own connection pool. The transport settings are explicit: `timeouts.connect` for dialing and the TLS handshake, TCP keep-alive, and up to 512 idle connections per host, because the default of 2 would make a busy gateway open and close connections constantly. There is no `Client.Timeout`: every call is bounded by its context, and streams by the router's watchdog. Error bodies are read up to 64 KiB and responses up to 16 MiB, so a broken upstream can't exhaust memory. Upstream SSE is parsed by a small `internal/sse` package, which isn't in the brief's layout but is shared by both adapters.
+
+**Rejected.** One shared client for all providers: a slow provider's connections would compete with everyone else's for the same pool limits.
+
+## 27. How upstream failures are classified (M3)
+
+**Decision.** On top of the brief's table:
+
+- **A 404 or 402 is a config error,** not a bad request. A 404 for a configured model means the gateway's own model ID is wrong, and a 402 is the gateway's own billing; neither is the client's fault, so the router falls back and logs loudly.
+- **An OpenAI 429 about money is a config error, not a rate limit.** That covers `insufficient_quota`, credit exhausted, and the spend and usage limits. Waiting won't fix it, so the router falls back instead of retrying.
+- **Errors inside streams.** An OpenAI error object mid-stream is Unavailable. An Anthropic `error` event is classified by its type: `rate_limit_error` is RateLimited, and everything else, `overloaded_error` included, is Unavailable.
+- **A stream that ends early is a failure.** That means one ending without OpenAI's `[DONE]` or Anthropic's `message_stop`. The error must not wrap `io.EOF`, because callers read `io.EOF` as a complete stream. A test caught exactly that bug.
+- **A cancelled context wins.** A transport error during a call whose context has ended is reported as that context's error, so a client disconnect is never mistaken for an upstream failure.
+
+**Rejected.** Classifying by status code alone: a quota 429 would be retried for nothing, and a typo in a model ID would reach the client as its own bad request.
+
+## 28. Request rules that differ by provider and model (M3)
+
+**Context.** Brief sections 6.2 and 7: sampling parameters differ by provider and model. Current Claude models (Opus 4.7 and later, Sonnet 5 and later, Haiku 5.5) reject any non-default `temperature`, `top_p` or `top_k`. Haiku 5.5 also rejects `temperature` and `top_p` together. Older Claude models take `temperature` from 0 to 1. OpenAI reasoning models restrict sampling too.
+
+**Decision.** Two layers, both checked against every target of an alias before the first attempt:
+
+1. **Per target:** `sampling: false` in the config marks a model that takes no sampling parameters. A request that sets `temperature` or `top_p` for that alias gets a 400 naming the parameter.
+2. **Per provider:** an adapter can implement `Validate`. Anthropic's checks that temperature is from 0 to 1, that `temperature` and `top_p` aren't both set, and that every user and assistant message has some text.
+
+Invalid requests are rejected, never clamped or dropped.
+
+**Rejected.** Clamping or dropping values: the client would get different output from what it asked for, without being told. Guessing support from the model name: model names change faster than code.
+
+## 29. Translating to Anthropic's Messages API (M3)
+
+**Decision.**
+
+- **System prompt:** `system` and `developer` messages, wherever they appear, become the top-level `system` blocks in order. Their position in the conversation is lost; Anthropic has no system role inside it.
+- **Content:** each text part becomes its own block, and empty parts are dropped, because Anthropic rejects empty text blocks.
+- **Usage:** `prompt_tokens` is input plus cache-creation plus cache-read tokens, since prompt-cache discounts aren't modelled.
+- **Stop reasons:** `max_tokens` and `model_context_window_exceeded` map to `length`, and `refusal` to `content_filter`. Everything else, unknown reasons included, maps to `stop`.
+- **Thinking:** left out of non-streaming replies; it becomes reasoning chunks in streams.
+- **Unknown stream events and delta types** are keepalives, as Anthropic's versioning policy asks.
+- **Prefill:** a final assistant message, which recent models reject, isn't checked; the rule depends on the model, and the upstream 400 comes back to the client as a bad request.
+
+## 30. Hidden reasoning counts as the first token but doesn't commit (M3)
+
+**Context.** Recent Claude models think by default, streaming thinking for a while before any text. Under decision 21 the first-token timeout would fire during a long think, and the gateway would retry a request that was working.
+
+**Decision.** A chunk can be marked `Reasoning`. The first output of any kind, text or reasoning, ends the first-token timeout and starts the idle timeout. The commit point is still the first text the client will see, so a failure during thinking can still fall back. A model that stalls after thinking hits the idle timeout. OpenAI's reasoning tokens aren't streamed in Chat Completions, so a reasoning model there needs a `first_token` timeout long enough for its thinking.
+
+**Rejected.** Treating thinking as keepalives: they don't show progress, so a long think would time out. Committing on thinking: the client would get a 200 with nothing in it, and a later failure couldn't fall back.
+
+## 31. Retries, fallback and breakers (M3)
+
+**Decision.** For each target in order:
+
+- **Breaker open:** the target is skipped.
+- **Unavailable:** retried up to `max_attempts_per_target` times, after an exponential backoff with full jitter (the M3 exercise).
+- **Rate limited:** waits out its `Retry-After` and retries, if the hint is no longer than `max_retry_after`. Otherwise, or with no hint, it falls back at once.
+- **Auth or config:** falls back without a retry.
+- **Bad request or cancellation:** stops everything.
+
+Each breaker hands out permits. Exactly one caller gets the half-open probe, results from calls let through before the breaker opened are ignored, and a neutral outcome (a rate limit, a bad request, a cancellation) neither counts nor closes it. A stream that fails after the commit point counts against its target's breaker too.
+
+When every target fails, the router returns an `ExhaustedError`:
+
+- if each target was only skipped or rate limited, it is a 503 (`upstream_unavailable` or `upstream_rate_limited`) with `Retry-After` set to the shortest hint or breaker cool-down;
+- if time ran out, a 504;
+- otherwise a 502, including a mix of rate limits and outright failures.
+
+Non-streaming calls have only the total deadline, because there is no first token to watch.
+
+**Rejected.** Retrying on auth errors: a wrong key stays wrong. Waiting out any `Retry-After`: one rate-limited provider could hold a request for a minute while another provider was free.
+
+## 32. The per-attempt story goes in the Result (M3)
+
+**Decision.** The router returns every attempt and skip in `Result.Tries` (target, outcome, error, duration). The server logs them with the request ID, which the router doesn't know about. They are logged when a request failed, or when it succeeded but needed more than one try, and at error level whenever any target had an auth or config problem, so a broken key is loud even when a fallback hides it from clients. `X-Tollgate-Attempts` counts calls made, not skips.
+
+**Rejected.** Logging from inside the router: it would need the server's request ID, and `internal/server` already imports `internal/router`.
+
+## 33. A provider without its key is disabled, not fatal (M3)
+
+**Context.** Brief section 19: `docker compose up` must work, and the mock alias must answer, without any provider keys.
+
+**Decision.** If a real provider's `api_key_env` variable is empty, startup logs a warning and the provider is replaced by one that fails every call with a config error. Aliases that use it fall back past it, logged at error level; aliases that don't are unaffected. `make run` and `make smoke` load `.env`, and `.env.example` lists the variables. The real-API tests have the `smoke` build tag, so `make test` and CI never call a paid API; they skip when a key or model isn't set.
+
+**Rejected.** Failing startup: the gateway couldn't run without every key, even for the mock. Skipping the provider silently: a missing key would only show up as unexplained fallbacks.
