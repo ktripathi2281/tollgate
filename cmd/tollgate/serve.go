@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 
 	"github.com/ktripathi2281/tollgate/internal/config"
 	"github.com/ktripathi2281/tollgate/internal/router"
@@ -28,7 +29,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger := newLogger(stdout, cfg.Log.SlogLevel())
 
-	providers, err := buildProviders(cfg.Providers)
+	providers, err := buildProviders(cfg, os.Getenv, logger)
 	if err != nil {
 		return err
 	}
