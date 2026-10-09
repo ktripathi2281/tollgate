@@ -1,0 +1,1 @@
+{"id":"msg_02","type":"message","role":"assistant","model":"claude-x-2026","content":[{"type":"text","text":"One two"}],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}
