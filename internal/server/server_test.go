@@ -49,10 +49,14 @@ func testServerWith(t *testing.T, p provider.Provider, mutate func(*config.Serve
 		mutate(&cfg)
 	}
 	target := []config.Target{{Provider: p.Name(), Model: "mock-1"}}
-	r, err := router.New(map[string]config.Model{
+	rcfg := config.Default()
+	rcfg.Timeouts = timeouts
+	rcfg.Retry.MaxAttemptsPerTarget = 1 // retries are the router's tests; here each failure shows once
+	rcfg.Models = map[string]config.Model{
 		"mock-fast": {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
 		"another":   {DefaultMaxTokens: 5, MaxTokensCeiling: 50, Targets: target},
-	}, map[string]provider.Provider{p.Name(): p}, timeouts)
+	}
+	r, err := router.New(rcfg, map[string]provider.Provider{p.Name(): p})
 	if err != nil {
 		t.Fatal(err)
 	}

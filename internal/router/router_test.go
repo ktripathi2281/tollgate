@@ -24,7 +24,9 @@ func newRouter(t *testing.T) *Router {
 		"fast": {DefaultMaxTokens: 10, MaxTokensCeiling: 20, Targets: []config.Target{{Provider: "b", Model: "b-small"}, {Provider: "a", Model: "a-1"}}},
 		"big":  {DefaultMaxTokens: 10, MaxTokensCeiling: 20, Targets: []config.Target{{Provider: "a", Model: "a-2"}}},
 	}
-	r, err := New(models, providers, testTimeouts)
+	cfg := testConfig(testTimeouts)
+	cfg.Models = models
+	r, err := New(cfg, providers)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -58,9 +60,7 @@ func TestChatUsesTheFirstTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
-	if want := (Result{Provider: "b", Model: "b-small", Attempts: 1}); res != want {
-		t.Errorf("Result = %+v, want %+v", res, want)
-	}
+	checkResult(t, res, "b", "b-small", "ok")
 	if resp.Model != "b-small" {
 		t.Errorf("response model = %q, want the upstream model b-small", resp.Model)
 	}
@@ -83,13 +83,37 @@ func TestChatTotalTimeout(t *testing.T) {
 	})
 }
 
+// checkResult checks who served a call and the outcome of each try.
+func checkResult(t *testing.T, res Result, provider, model string, outcomes ...string) {
+	t.Helper()
+	if res.Provider != provider || res.Model != model {
+		t.Errorf("served by %s/%s, want %s/%s", res.Provider, res.Model, provider, model)
+	}
+	got := make([]string, len(res.Tries))
+	attempts := 0
+	for i, try := range res.Tries {
+		got[i] = try.Outcome
+		if try.Outcome != "skipped" {
+			attempts++
+		}
+	}
+	if !slices.Equal(got, outcomes) {
+		t.Errorf("tries = %q, want %q", got, outcomes)
+	}
+	if res.Attempts != attempts {
+		t.Errorf("Attempts = %d, but %d tries were attempts", res.Attempts, attempts)
+	}
+}
+
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
 func TestNewRejectsUnknownProvider(t *testing.T) {
 	models := map[string]config.Model{"x": {Targets: []config.Target{{Provider: "nope", Model: "m"}}}}
-	if _, err := New(models, map[string]provider.Provider{}, testTimeouts); err == nil {
+	cfg := testConfig(testTimeouts)
+	cfg.Models = models
+	if _, err := New(cfg, map[string]provider.Provider{}); err == nil {
 		t.Error("New accepted a target with an unknown provider")
 	}
 }

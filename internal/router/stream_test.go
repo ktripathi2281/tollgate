@@ -87,12 +87,24 @@ func (s *scriptStream) Close() error {
 
 var testTimeouts = config.Timeouts{FirstToken: time.Second, Idle: time.Second, Total: time.Minute}
 
+// testConfig is the default config with the given timeouts and a single
+// attempt per target, so tests that aren't about retries see each failure
+// exactly once.
+func testConfig(timeouts config.Timeouts) *config.Config {
+	cfg := config.Default()
+	cfg.Timeouts = timeouts
+	cfg.Retry.MaxAttemptsPerTarget = 1
+	return cfg
+}
+
 // streamRouter returns a router with one alias, "a", backed by p.
 func streamRouter(t *testing.T, p provider.Provider, timeouts config.Timeouts) (*Router, *Alias) {
 	t.Helper()
-	r, err := New(map[string]config.Model{
+	cfg := testConfig(timeouts)
+	cfg.Models = map[string]config.Model{
 		"a": {DefaultMaxTokens: 10, MaxTokensCeiling: 10, Targets: []config.Target{{Provider: p.Name(), Model: "m-1"}}},
-	}, map[string]provider.Provider{p.Name(): p}, timeouts)
+	}
+	r, err := New(cfg, map[string]provider.Provider{p.Name(): p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,9 +149,7 @@ func TestStreamCommitsOnFirstContent(t *testing.T) {
 		if committed := time.Since(start); committed != 30*time.Millisecond {
 			t.Errorf("committed after %v, want 30ms, at the first content", committed)
 		}
-		if res != (Result{Provider: "scripted", Model: "m-1", Attempts: 1}) {
-			t.Errorf("Result = %+v", res)
-		}
+		checkResult(t, res, "scripted", "m-1", "ok")
 		if s.Model() != "m-1-2026" {
 			t.Errorf("Model() = %q, want the model the upstream reported", s.Model())
 		}
@@ -359,6 +369,49 @@ func TestStreamClientCancelIsNotATimeout(t *testing.T) {
 		time.AfterFunc(100*time.Millisecond, cancel)
 		if _, err := s.Next(); provider.ClassOf(err) != provider.Cancelled {
 			t.Errorf("got %v (%v), want Cancelled", err, provider.ClassOf(err))
+		}
+	})
+}
+
+// Hidden reasoning, such as Claude's thinking, shows the model is working:
+// it satisfies the first-token timeout without committing the stream.
+func TestStreamReasoningCountsAsTheFirstToken(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Thinking every 500ms for 3s, then the answer. The first-token and
+		// idle timeouts are both 1s.
+		var steps []step
+		for range 6 {
+			steps = append(steps, step{after: 500 * time.Millisecond, chunk: &provider.Chunk{Reasoning: true}})
+		}
+		steps = append(steps, content(500*time.Millisecond, "answer"))
+		r, alias := streamRouter(t, &scripted{steps: steps}, testTimeouts)
+
+		start := time.Now()
+		s, _, err := r.ChatStream(t.Context(), alias, provider.ChatRequest{})
+		if err != nil {
+			t.Fatalf("got %v: thinking should hold off the first-token timeout", err)
+		}
+		defer s.Close()
+		if committed := time.Since(start); committed != 3500*time.Millisecond {
+			t.Errorf("committed after %v, want 3.5s, at the first text", committed)
+		}
+		if text, err := collect(s); text != "answer" || err != nil {
+			t.Errorf("got %q, %v; want only the answer: reasoning is never sent", text, err)
+		}
+	})
+}
+
+func TestStreamStallAfterReasoningIsAnIdleTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &scripted{steps: []step{
+			{after: 500 * time.Millisecond, chunk: &provider.Chunk{Reasoning: true}},
+			content(forever, "never"),
+		}}
+		r, alias := streamRouter(t, p, testTimeouts)
+		start := time.Now()
+		_, _, err := r.ChatStream(t.Context(), alias, provider.ChatRequest{})
+		if !errors.Is(err, ErrIdleTimeout) || time.Since(start) != 1500*time.Millisecond {
+			t.Errorf("got %v after %v, want ErrIdleTimeout after 1.5s", err, time.Since(start))
 		}
 	})
 }
