@@ -57,3 +57,17 @@ func TestTransportError(t *testing.T) {
 		t.Errorf("got %v (%v), want Cancelled", err, ClassOf(err))
 	}
 }
+
+func TestDisabled(t *testing.T) {
+	p := Disabled("openai", "OPENAI_API_KEY is not set")
+	if p.Name() != "openai" {
+		t.Errorf("Name() = %q", p.Name())
+	}
+	_, chatErr := p.Chat(t.Context(), &ChatRequest{})
+	_, streamErr := p.ChatStream(t.Context(), &ChatRequest{})
+	for _, err := range []error{chatErr, streamErr} {
+		if ClassOf(err) != AuthOrConfig || !strings.Contains(err.Error(), "OPENAI_API_KEY is not set") {
+			t.Errorf("got %v, want an AuthOrConfig error giving the reason", err)
+		}
+	}
+}
