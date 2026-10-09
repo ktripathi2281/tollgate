@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # Lint the real-API smoke tests too, which only build with this tag.
+  build-tags:
+    - smoke
+
 linters:
   # standard = errcheck, govet, ineffassign, staticcheck, unused.
   default: standard
