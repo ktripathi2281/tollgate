@@ -177,9 +177,34 @@ func (t Target) AcceptsSampling() bool {
 type Price struct {
 	Input  string `yaml:"input"`
 	Output string `yaml:"output"`
+	// LongContext, if set, prices requests with long prompts: some models
+	// charge more for a whole request, input and output, once its prompt
+	// passes a size.
+	LongContext *LongContextPrice `yaml:"long_context"`
 
 	InputMicros  money.Micros `yaml:"-"` // micro-USD per million input tokens
 	OutputMicros money.Micros `yaml:"-"` // micro-USD per million output tokens
+}
+
+// LongContextPrice replaces both of a Price's rates for a request whose
+// prompt has more than AbovePromptTokens tokens.
+type LongContextPrice struct {
+	AbovePromptTokens int    `yaml:"above_prompt_tokens"`
+	Input             string `yaml:"input"`
+	Output            string `yaml:"output"`
+
+	InputMicros  money.Micros `yaml:"-"`
+	OutputMicros money.Micros `yaml:"-"`
+}
+
+// Rates returns the input and output prices, in micro-USD per million
+// tokens, for a request whose prompt has promptTokens tokens. Prompt
+// tokens include cached ones, as providers count them for this purpose.
+func (p Price) Rates(promptTokens int) (input, output money.Micros) {
+	if lc := p.LongContext; lc != nil && promptTokens > lc.AbovePromptTokens {
+		return lc.InputMicros, lc.OutputMicros
+	}
+	return p.InputMicros, p.OutputMicros
 }
 
 // PriceKey returns the Pricing key for a target: "provider/model".
@@ -484,15 +509,45 @@ func (c *Config) validatePricing(p *problems) {
 	for _, key := range slices.Sorted(maps.Keys(c.Pricing)) {
 		price := c.Pricing[key]
 		field := fmt.Sprintf("pricing[%q]", key)
-		var err error
-		if price.InputMicros, err = money.ParseUSD(price.Input); err != nil {
-			p.addf(field+".input", "%v", err)
-		}
-		if price.OutputMicros, err = money.ParseUSD(price.Output); err != nil {
-			p.addf(field+".output", "%v", err)
+		var ok bool
+		price.InputMicros, price.OutputMicros, ok = parseRates(p, field, price.Input, price.Output)
+		if price.LongContext != nil {
+			validateLongContext(p, field+".long_context", price, ok)
 		}
 		// Map values aren't addressable, so store the parsed copy back.
 		c.Pricing[key] = price
+	}
+}
+
+// parseRates parses an input and an output price, recording a problem for
+// each one that is invalid. ok reports whether both parsed.
+func parseRates(p *problems, field, input, output string) (in, out money.Micros, ok bool) {
+	in, inErr := money.ParseUSD(input)
+	if inErr != nil {
+		p.addf(field+".input", "%v", inErr)
+	}
+	out, outErr := money.ParseUSD(output)
+	if outErr != nil {
+		p.addf(field+".output", "%v", outErr)
+	}
+	return in, out, inErr == nil && outErr == nil
+}
+
+// validateLongContext parses a price's long-context tier, through its
+// pointer, and checks it against the base price. baseOK reports whether
+// the base price parsed.
+func validateLongContext(p *problems, field string, price Price, baseOK bool) {
+	lc := price.LongContext
+	if lc.AbovePromptTokens < 1 {
+		p.addf(field+".above_prompt_tokens", "must be at least 1, got %d", lc.AbovePromptTokens)
+	}
+	var ok bool
+	lc.InputMicros, lc.OutputMicros, ok = parseRates(p, field, lc.Input, lc.Output)
+	// A budget hold prices an upper bound on the prompt, which can be over
+	// the threshold when the real prompt isn't. The hold is only an upper
+	// bound on the cost if crossing the threshold never lowers a price.
+	if ok && baseOK && (lc.InputMicros < price.InputMicros || lc.OutputMicros < price.OutputMicros) {
+		p.addf(field, "prices must not be lower than the base prices")
 	}
 }
 
