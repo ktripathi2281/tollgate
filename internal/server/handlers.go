@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/api"
+	"github.com/ktripathi2281/tollgate/internal/budget"
+	"github.com/ktripathi2281/tollgate/internal/idempotency"
 	"github.com/ktripathi2281/tollgate/internal/provider"
 	"github.com/ktripathi2281/tollgate/internal/router"
 	"github.com/ktripathi2281/tollgate/internal/usage"
@@ -25,12 +28,13 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleChatCompletions serves POST /v1/chat/completions. The steps follow
-// the request pipeline in brief section 5. Authentication and the
-// requests-per-minute limit have already run, as middleware; idempotency
-// and budgets slot in between these steps in a later milestone.
+// the request pipeline in brief section 5; authentication and the
+// requests-per-minute limit (steps 3 and 4) have already run, as
+// middleware.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	received := s.now()
-	key := keyFrom(r.Context())
+	ctx := r.Context()
+	key := keyFrom(ctx)
 
 	// Parse and validate the body, size-limited.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes))
@@ -65,7 +69,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Every upstream call gets a real limit on output tokens: the client's,
-	// or the alias default. The budget hold (M5) depends on this bound.
+	// or the alias default. The budget hold depends on this bound.
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = alias.DefaultMaxTokens
@@ -79,19 +83,79 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve tokens per minute (pipeline step 7): the estimated prompt
-	// plus the most the reply may use. The deferred refund gives back what
-	// the request didn't use once the response is written (step 12), on
-	// every exit path: success, failure, a client that went away, or a
-	// panic. used stays 0 unless tokens were spent.
-	reserved := usage.EstimatePrompt(req.Messages) + maxTokens
-	if apiErr := s.reserveTokens(key, reserved); apiErr != nil {
+	// From here on the request takes things that must be given back:
+	// an idempotency record, a token reservation, a budget hold. Each is
+	// given back by a deferred call registered as it is taken, so the
+	// unwind happens in reverse order on every exit path, panics included.
+	// The normal paths call a.finish first, so the outcome is saved before
+	// the client sees the response; the deferred calls then do nothing.
+	a := s.newAccounting(r, key)
+
+	// Step 6: idempotency. A retry of a completed request gets the stored
+	// response, with no provider call, no reservation and no hold.
+	if v := r.Header.Get(idempotency.Header); v != "" {
+		idemKey, err := idempotency.ParseKey(v)
+		if err != nil {
+			api.WriteError(w, &api.Error{
+				Status: http.StatusBadRequest, Type: api.TypeInvalidRequest, Code: api.CodeInvalidIdempotency,
+				Message: err.Error() + ".",
+			})
+			return
+		}
+		res, err := s.idem.Begin(ctx, key.ID, idemKey, body, a.requestID)
+		if err != nil {
+			s.unavailable(w, r, api.CodeIdempotencyUnavailable, "Idempotency keys", err)
+			return
+		}
+		switch res.Outcome {
+		case idempotency.Replay:
+			s.replay(w, res, req.Stream, req.IncludeUsage)
+			return
+		case idempotency.Proceed:
+			a.idem = res.Lock
+			defer a.endIdempotency(0, nil)
+		default:
+			api.WriteError(w, idempotencyError(res))
+			return
+		}
+	}
+
+	// Step 7: reserve tokens per minute, the estimated prompt plus the most
+	// the reply may use. What the request didn't use is refunded once the
+	// response is written (step 12).
+	a.reserved = usage.EstimatePrompt(req.Messages) + maxTokens
+	if apiErr := s.reserveTokens(key, a.reserved); apiErr != nil {
+		a.finish(0, nil)
 		api.WriteError(w, apiErr)
 		return
 	}
-	used := 0
-	defer func() { s.limiter.RefundTokens(key.ID, limitsOf(key), reserved, used) }()
+	defer a.refundTokens()
 
+	// Step 8: hold the worst-case cost against the key's budget.
+	if key.Budget > 0 {
+		amount, err := s.worstCase(alias, req.Messages, maxTokens)
+		if err != nil {
+			// Config validation gives every target a price, so this is a bug.
+			a.finish(0, nil)
+			s.internalError(w, r, err)
+			return
+		}
+		hold, err := s.budgets.Hold(ctx, key, amount, a.requestID)
+		switch {
+		case errors.Is(err, budget.ErrExceeded):
+			a.finish(0, nil)
+			api.WriteError(w, budgetExceeded(key, amount, received))
+			return
+		case err != nil:
+			a.finish(0, nil)
+			s.unavailable(w, r, api.CodeBudgetUnavailable, "Budgets", err)
+			return
+		}
+		a.hold = hold
+		defer a.endHold()
+	}
+
+	// Step 9: route and call the provider.
 	creq := provider.ChatRequest{
 		Messages:    req.Messages,
 		MaxTokens:   maxTokens,
@@ -100,24 +164,59 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Stop:        req.Stop,
 	}
 	if req.Stream {
-		used = s.streamChat(w, r, alias, creq, req.IncludeUsage, received)
+		s.streamChat(w, r, alias, creq, req.IncludeUsage, received, a)
 		return
 	}
 
-	resp, result, err := s.router.Chat(r.Context(), alias, creq)
-	s.logTries(r.Context(), alias.Name, result, err)
+	resp, result, err := s.router.Chat(ctx, alias, creq)
+	s.logTries(ctx, alias.Name, result, err)
 	w.Header().Set(HeaderProvider, result.Provider)
 	w.Header().Set(HeaderAttempts, strconv.Itoa(result.Attempts))
 	if err != nil {
-		if apiErr := s.upstreamError(r.Context(), err); apiErr != nil {
+		a.finish(0, nil)
+		if apiErr := s.upstreamError(ctx, err); apiErr != nil {
 			api.WriteError(w, apiErr)
 		}
 		return
 	}
 
+	// Steps 10 and 11: save the outcome, then send it. If the process
+	// stopped in between, a retry with the same idempotency key would get
+	// the stored response instead of a second provider call.
 	u, _ := usageOrEstimate(resp.Usage, creq, resp.Content)
-	used = u.PromptTokens + u.CompletionTokens
-	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp, u))
+	a.recordUsage(result.Provider, result.Model, u)
+	out, err := json.Marshal(api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp, u))
+	if err != nil {
+		a.finish(0, nil)
+		s.internalError(w, r, err)
+		return
+	}
+	a.finish(http.StatusOK, out)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+// internalError answers with a 500 for a bug, and logs it.
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	s.log.ErrorContext(r.Context(), "internal error", "request_id", RequestID(r.Context()), "error", err)
+	api.WriteError(w, &api.Error{
+		Status: http.StatusInternalServerError, Type: api.TypeServer, Code: api.CodeInternal,
+		Message: "The gateway hit an internal error.",
+	})
+}
+
+// unavailable answers a request when a database-backed step failed for a
+// reason other than the client going away.
+func (s *Server) unavailable(w http.ResponseWriter, r *http.Request, code, what string, err error) {
+	if r.Context().Err() != nil {
+		return // the client went away
+	}
+	s.log.ErrorContext(r.Context(), "database step failed", "request_id", RequestID(r.Context()), "code", code, "error", err)
+	api.WriteError(w, &api.Error{
+		Status: http.StatusServiceUnavailable, Type: api.TypeServer, Code: code,
+		Message: what + " can't be checked right now. Retry shortly.", RetryAfter: time.Second,
+	})
 }
 
 // errShuttingDown is the cause given to every request context still running

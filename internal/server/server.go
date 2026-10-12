@@ -29,7 +29,10 @@ type Server struct {
 	router   *router.Router
 	keys     Authenticator
 	limiter  Limiter
-	now      func() time.Time // the clock for response timestamps; tests replace it
+	budgets  Budgets
+	idem     Idempotency
+	pricing  map[string]config.Price // by config.PriceKey
+	now      func() time.Time        // the clock for response timestamps; tests replace it
 	started  time.Time
 	http     *http.Server
 	handlers sync.WaitGroup // requests being handled, so shutdown can wait for them
@@ -37,9 +40,13 @@ type Server struct {
 
 // Deps are the parts the server is built from, besides its config.
 type Deps struct {
-	Router  *router.Router
-	Keys    Authenticator
-	Limiter Limiter
+	Router      *router.Router
+	Keys        Authenticator
+	Limiter     Limiter
+	Budgets     Budgets
+	Idempotency Idempotency
+	// Pricing has a price for every target, by config.PriceKey.
+	Pricing map[string]config.Price
 	Log     *slog.Logger
 }
 
@@ -52,6 +59,9 @@ func New(cfg config.Server, timeouts config.Timeouts, d Deps) *Server {
 		router:   d.Router,
 		keys:     d.Keys,
 		limiter:  d.Limiter,
+		budgets:  d.Budgets,
+		idem:     d.Idempotency,
+		pricing:  d.Pricing,
 		now:      time.Now,
 		started:  time.Now(),
 	}

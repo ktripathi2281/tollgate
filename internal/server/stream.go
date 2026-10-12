@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -17,10 +18,11 @@ import (
 )
 
 // streamChat serves a streaming request, following the rules in brief
-// section 8. It returns how many tokens the request used: the provider's
-// count, an estimate if it sent none, or 0 if no stream started.
+// section 8. It records what the request used in a and finishes a. A stream
+// that completes is stored under its idempotency key before the final
+// [DONE], so a client that saw the stream end can always replay it.
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *router.Alias,
-	req provider.ChatRequest, includeUsage bool, received time.Time) int {
+	req provider.ChatRequest, includeUsage bool, received time.Time, a *accounting) {
 	ctx := r.Context()
 
 	stream, result, err := s.router.ChatStream(ctx, alias, req)
@@ -30,33 +32,31 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 	if err != nil {
 		// Before the commit point the client has seen nothing, so the
 		// failure is an ordinary error response.
+		a.finish(0, nil)
 		if apiErr := s.upstreamError(ctx, err); apiErr != nil {
 			api.WriteError(w, apiErr)
 		}
-		return 0
+		return
 	}
 	defer stream.Close() // also cancels the upstream call if it is still running
 
 	// The commit point. From here on the response is an event stream, and
 	// a failure can only be reported inside it.
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("X-Accel-Buffering", "no") // stop proxies such as nginx buffering the stream
-	w.WriteHeader(http.StatusOK)
-
+	startEventStream(w)
 	out := &eventSender{sse: api.NewSSEWriter(w), writeTimeout: s.timeouts.Idle}
 	defer out.clearDeadline()
-	chunks := api.NewChunks("chatcmpl-"+rand.Text(), received, stream.Model())
+	id := "chatcmpl-" + rand.Text()
+	chunks := api.NewChunks(id, received, stream.Model())
 
 	var (
 		reply    strings.Builder // the text so far, to estimate usage if the provider reports none
 		reported *provider.Usage
 		finish   provider.FinishReason
 	)
-	// summary logs how the stream ended and returns the tokens it used.
-	summary := func(outcome string) int {
+	// spent records what the stream used so far and logs how it ended.
+	spent := func(outcome string) {
 		u, estimated := usageOrEstimate(reported, req, reply.String())
+		a.recordUsage(result.Provider, result.Model, u)
 		s.log.InfoContext(ctx, "stream ended",
 			slog.String("request_id", RequestID(ctx)),
 			slog.String("provider", result.Provider),
@@ -66,13 +66,19 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 			slog.Int("completion_tokens", u.CompletionTokens),
 			slog.Bool("usage_estimated", estimated),
 		)
-		return u.PromptTokens + u.CompletionTokens
+	}
+	// failed ends a stream that didn't complete. Tokens were still used,
+	// so the hold is settled; nothing is stored for replay.
+	failed := func(outcome string) {
+		spent(outcome)
+		a.finish(0, nil)
 	}
 
 	// One loop reads, translates and writes, so a slow client slows the
 	// upstream read down instead of piling chunks up in memory.
 	if out.send(chunks.Role()) != nil {
-		return summary("client_gone")
+		failed("client_gone")
+		return
 	}
 	for {
 		chunk, err := stream.Next()
@@ -85,15 +91,18 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 			// partial reply for a complete one.
 			apiErr := s.upstreamError(ctx, err)
 			if apiErr == nil {
-				return summary("client_gone")
+				failed("client_gone")
+				return
 			}
 			_ = out.send(apiErr.Envelope())
-			return summary(apiErr.Code)
+			failed(apiErr.Code)
+			return
 		}
 		if chunk.Delta != "" {
 			reply.WriteString(chunk.Delta)
 			if out.send(chunks.Content(chunk.Delta)) != nil {
-				return summary("client_gone")
+				failed("client_gone")
+				return
 			}
 		}
 		if chunk.FinishReason != "" {
@@ -111,18 +120,38 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		finish = provider.FinishStop
 	}
 	if out.send(chunks.Finish(finish)) != nil {
-		return summary("client_gone")
+		failed("client_gone")
+		return
 	}
+	u, _ := usageOrEstimate(reported, req, reply.String())
 	if includeUsage {
-		u, _ := usageOrEstimate(reported, req, reply.String())
 		if out.send(chunks.Usage(u)) != nil {
-			return summary("client_gone")
+			failed("client_gone")
+			return
 		}
 	}
-	if out.done() != nil {
-		return summary("client_gone")
+
+	// Save the outcome, the assembled completion included, before the
+	// final event.
+	spent("completed")
+	completion, err := json.Marshal(api.NewChatCompletion(id, received,
+		&provider.ChatResponse{Model: stream.Model(), Content: reply.String(), FinishReason: finish}, u))
+	if err != nil {
+		completion = nil // can't happen; then nothing is stored
 	}
-	return summary("completed")
+	a.finish(http.StatusOK, completion)
+	if out.done() != nil {
+		s.log.InfoContext(ctx, "the client left before the final event", "request_id", RequestID(ctx))
+	}
+}
+
+// startEventStream commits the response to an event stream.
+func startEventStream(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Accel-Buffering", "no") // stop proxies such as nginx buffering the stream
+	w.WriteHeader(http.StatusOK)
 }
 
 // eventSender writes events, each with a write deadline. A slow client
