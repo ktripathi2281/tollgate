@@ -508,3 +508,7 @@ Changes agreed after the first review (2026-10-07). Each has an entry in `docs/D
 4. Requests are validated against every target in the alias (sections 6.2, 7).
 5. One circuit breaker per target (provider plus model), not per provider (section 7).
 6. 503 with `Retry-After` when every breaker is open or every target is rate-limited upstream (sections 4, 7).
+
+Agreed during M3 (2026-10-12):
+
+7. A price can have a long-context tier, used for a request whose prompt is over a threshold. The budget hold uses the tier when its input bound is over the threshold (sections 9, 9.1). DECISIONS entry 34.

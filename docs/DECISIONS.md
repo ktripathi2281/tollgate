@@ -294,3 +294,13 @@ Non-streaming calls have only the total deadline, because there is no first toke
 **Decision.** If a real provider's `api_key_env` variable is empty, startup logs a warning and the provider is replaced by one that fails every call with a config error. Aliases that use it fall back past it, logged at error level; aliases that don't are unaffected. `make run` and `make smoke` load `.env`, and `.env.example` lists the variables. The real-API tests have the `smoke` build tag, so `make test` and CI never call a paid API; they skip when a key or model isn't set.
 
 **Rejected.** Failing startup: the gateway couldn't run without every key, even for the mock. Skipping the provider silently: a missing key would only show up as unexplained fallbacks.
+
+## 34. Long-context price tiers (M3)
+
+**Context.** Claude Haiku 5.5, behind the `fast` alias, has two prices. A request whose prompt is over 100,000 tokens pays $0.50 instead of $0.10 per million input tokens, and $2.50 instead of $0.50 per million output tokens, for the whole request. The prompt count includes cached tokens. With one price per target, those requests would be recorded at a fifth of their cost.
+
+**Decision.** A price can have one optional tier: `long_context: { above_prompt_tokens, input, output }`. `Price.Rates(promptTokens)` returns the tier's prices when the prompt is strictly over the threshold, and the base prices otherwise. Startup rejects a tier with a threshold below 1, or with either price lower than the base price.
+
+The M5 budget hold prices its upper bound on the prompt with the same rule, target by target, and takes the largest. That is only an upper bound if crossing the threshold never lowers a price, which is why cheaper tier prices are rejected. Settling uses the prompt tokens the provider reports. If usage is estimated, the estimate picks the tier.
+
+**Rejected.** Always charging the higher price: most requests would be recorded at five times their cost. A list of tiers: no current price list has more than one threshold, and one tier is easier to read and validate. Capping prompts below the threshold: a client sending a long prompt should pay the long-context price, not get an error.
