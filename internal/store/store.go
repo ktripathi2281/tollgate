@@ -7,6 +7,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"time"
 
@@ -63,7 +64,7 @@ func (s *Store) Close() {
 // their names and the schema version afterwards. A Postgres advisory lock
 // makes concurrent runs take turns.
 func (s *Store) Migrate(ctx context.Context) (applied []string, version int64, err error) {
-	p, err := s.migrator()
+	p, err := s.migrator(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -88,7 +89,7 @@ func (s *Store) Migrate(ctx context.Context) (applied []string, version int64, e
 // CheckSchema returns an error if any migration hasn't been applied, so
 // the gateway never runs queries against an older schema.
 func (s *Store) CheckSchema(ctx context.Context) error {
-	p, err := s.migrator()
+	p, err := s.migrator(ctx)
 	if err != nil {
 		return err
 	}
@@ -107,12 +108,23 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // migrator returns a goose provider over the embedded migrations. goose
 // works on database/sql, so it gets a *sql.DB that borrows connections
 // from the pool. Closing the provider closes that *sql.DB, not the pool.
-func (s *Store) migrator() (*goose.Provider, error) {
+//
+// The advisory lock that makes concurrent migrations take turns is per
+// schema: its ID is a hash of the schema's name. Runs against the same
+// schema wait for each other; runs against different schemas, such as
+// parallel tests, don't.
+func (s *Store) migrator(ctx context.Context) (*goose.Provider, error) {
 	fsys, err := fs.Sub(migrations, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
-	locker, err := lock.NewPostgresSessionLocker()
+	var schema string
+	if err := s.pool.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
+		return nil, fmt.Errorf("migrations: read the current schema: %w", err)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("tollgate migrations " + schema))
+	locker, err := lock.NewPostgresSessionLocker(lock.WithLockID(int64(h.Sum64())))
 	if err != nil {
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
