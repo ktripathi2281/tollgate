@@ -16,8 +16,11 @@ const usage = `Usage: tollgate <command> [flags]
 
 Commands:
   serve    run the gateway
+  migrate  apply database migrations
+  keys     create, list and revoke API keys
 
-Run "tollgate <command> -h" for a command's flags.
+The database comes from $DATABASE_URL. Run "tollgate <command> -h" for a
+command's flags.
 `
 
 func main() {
@@ -50,6 +53,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "serve":
 		err = serve(ctx, rest, stdout, stderr)
+	case "migrate":
+		err = migrate(ctx, rest, stdout, stderr)
+	case "keys":
+		err = keys(ctx, rest, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
