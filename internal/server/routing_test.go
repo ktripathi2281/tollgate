@@ -41,7 +41,7 @@ func TestInvalidForATargetIsABadRequest(t *testing.T) {
 		"pick": mock.New("pick", mock.Config{OutputTokens: 1}),
 	}
 	// The second target's model rejects sampling parameters.
-	s, _ := routedServer(t, providers, []config.Target{
+	s, logs := routedServer(t, providers, []config.Target{
 		{Provider: "mock", Model: "m-1"},
 		{Provider: "pick", Model: "m-2", Sampling: new(false)},
 	}, nil)
@@ -54,6 +54,10 @@ func TestInvalidForATargetIsABadRequest(t *testing.T) {
 	e := decodeError(t, rec)
 	if deref(e.Code) != api.CodeInvalidValue || deref(e.Param) != "temperature" || !strings.Contains(e.Message, "mock-fast") {
 		t.Errorf("error = %+v, want invalid_value for temperature naming the model", e)
+	}
+	// No upstream was called, so there is no upstream story to log.
+	if strings.Contains(logs.String(), `"msg":"upstream`) {
+		t.Errorf("a rejected request was logged as an upstream outcome:\n%s", logs)
 	}
 }
 

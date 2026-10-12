@@ -200,6 +200,11 @@ func (s *Server) logTries(ctx context.Context, alias string, res router.Result, 
 	if err == nil && len(res.Tries) <= 1 {
 		return
 	}
+	// A request the router rejected before any attempt is the client's
+	// mistake, not an upstream outcome; the access log records the 400.
+	if _, ok := errors.AsType[*router.InvalidRequestError](err); ok {
+		return
+	}
 	level, msg := slog.LevelInfo, "upstream recovered"
 	if err != nil {
 		level, msg = slog.LevelWarn, "upstream failed"
