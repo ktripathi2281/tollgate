@@ -1,0 +1,27 @@
+# Local services. For now that is only Postgres; the gateway, the mock
+# upstream and Prometheus join in M7.
+#
+#   docker compose up -d --wait postgres     (or: make db)
+#
+# The password is for this local container only. A real deployment gets its
+# database URL from its secret store.
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: tollgate
+      POSTGRES_PASSWORD: tollgate
+      POSTGRES_DB: tollgate
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # Postgres 18 images keep their data under /var/lib/postgresql.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tollgate -d tollgate"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

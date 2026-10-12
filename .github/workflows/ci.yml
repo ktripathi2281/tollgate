@@ -25,6 +25,24 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # The tests that need Postgres run against this one. In CI they fail,
+    # rather than skip, if the database URL is missing.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tollgate
+          POSTGRES_PASSWORD: tollgate
+          POSTGRES_DB: tollgate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tollgate -d tollgate"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TOLLGATE_TEST_DATABASE_URL: postgres://tollgate:tollgate@localhost:5432/tollgate?sslmode=disable
     steps:
       - uses: actions/checkout@v7
         with:
