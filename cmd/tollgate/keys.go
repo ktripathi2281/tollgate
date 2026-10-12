@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/auth"
+	"github.com/ktripathi2281/tollgate/internal/budget"
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/money"
 	"github.com/ktripathi2281/tollgate/internal/store"
 )
 
@@ -57,6 +59,8 @@ func keysCreate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	tpm := fs.Int("tpm", 100_000, "tokens per minute: estimated prompt plus max_tokens")
 	models := fs.String("models", "", "comma-separated aliases the key may use (default: every alias)")
 	configPath := fs.String("config", "config.yaml", "the config file, to check -models against")
+	budgetUSD := fs.String("budget", "", "spend budget per period in USD, such as 10.00 (default: no budget)")
+	period := fs.String("period", budget.Monthly, "budget period, in UTC: daily or monthly")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -71,6 +75,16 @@ func keysCreate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	allowed, err := parseModels(*models, *configPath)
 	if err != nil {
 		return err
+	}
+	amount, err := parseBudget(*budgetUSD, *period)
+	if err != nil {
+		return err
+	}
+	if amount == 0 {
+		if flagSet(fs, "period") {
+			return errors.New("keys create: -period needs -budget")
+		}
+		*period = "" // no budget, so no period
 	}
 
 	s, err := openStore(ctx)
@@ -87,6 +101,8 @@ func keysCreate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		RPM:           *rpm,
 		TPM:           *tpm,
 		AllowedModels: allowed,
+		Budget:        amount,
+		BudgetPeriod:  *period,
 	})
 	if err != nil {
 		return err
@@ -124,6 +140,29 @@ func parseModels(flagValue, configPath string) ([]string, error) {
 	return aliases, nil
 }
 
+// flagSet reports whether the flag was given on the command line.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
+}
+
+// parseBudget turns the -budget and -period flags into the key's budget:
+// zero for no budget.
+func parseBudget(usd, period string) (money.Micros, error) {
+	if usd == "" {
+		return 0, nil
+	}
+	amount, err := money.ParseUSD(usd)
+	if err != nil || amount == 0 {
+		return 0, fmt.Errorf("keys create: -budget must be a positive amount in USD, such as 10.00, got %q", usd)
+	}
+	if period != budget.Daily && period != budget.Monthly {
+		return 0, fmt.Errorf("keys create: -period must be daily or monthly, got %q", period)
+	}
+	return amount, nil
+}
+
 func keysList(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("keys list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -142,18 +181,22 @@ func keysList(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tPREFIX\tRPM\tTPM\tMODELS\tCREATED\tREVOKED")
+	fmt.Fprintln(w, "ID\tNAME\tPREFIX\tRPM\tTPM\tMODELS\tBUDGET\tCREATED\tREVOKED")
 	for _, k := range list {
 		models := "all"
 		if k.AllowedModels != nil {
 			models = strings.Join(k.AllowedModels, ",")
 		}
+		spend := "-"
+		if k.Budget > 0 {
+			spend = k.Budget.String() + " " + k.BudgetPeriod
+		}
 		revoked := "-"
 		if k.RevokedAt != nil {
 			revoked = k.RevokedAt.UTC().Format(time.DateTime)
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
-			k.ID, k.Name, k.Prefix, k.RPM, k.TPM, models, k.CreatedAt.UTC().Format(time.DateTime), revoked)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n",
+			k.ID, k.Name, k.Prefix, k.RPM, k.TPM, models, spend, k.CreatedAt.UTC().Format(time.DateTime), revoked)
 	}
 	return w.Flush()
 }

@@ -115,6 +115,11 @@ func TestRun(t *testing.T) {
 		{name: "keys create zero rpm", args: []string{"keys", "create", "-name", "x", "-rpm", "0"}, wantErr: "-rpm and -tpm must be at least 1"},
 		{name: "keys create unknown alias", args: []string{"keys", "create", "-name", "x", "-models", "mock-fast,nope", "-config", "testdata/mock.yaml"}, wantErr: `no model alias "nope"`},
 		{name: "keys create empty alias list", args: []string{"keys", "create", "-name", "x", "-models", " , ", "-config", "testdata/mock.yaml"}, wantErr: "lists no aliases"},
+		{name: "keys create zero budget", args: []string{"keys", "create", "-name", "x", "-budget", "0"}, wantErr: "-budget must be a positive amount"},
+		{name: "keys create budget not a number", args: []string{"keys", "create", "-name", "x", "-budget", "ten"}, wantErr: "-budget must be a positive amount"},
+		{name: "keys create unknown period", args: []string{"keys", "create", "-name", "x", "-budget", "1", "-period", "weekly"}, wantErr: "-period must be daily or monthly"},
+		{name: "keys create period without budget", args: []string{"keys", "create", "-name", "x", "-period", "daily"}, wantErr: "-period needs -budget"},
+		{name: "reconcile extra arguments", args: []string{"reconcile", "now"}, wantErr: "unexpected arguments"},
 		{name: "keys revoke without an id", args: []string{"keys", "revoke"}, wantErr: "-id is required"},
 		{name: "keys list extra arguments", args: []string{"keys", "list", "all"}, wantErr: "unexpected arguments"},
 	}
@@ -202,15 +207,16 @@ func TestMigrateAndKeysCommands(t *testing.T) {
 		return stdout.String()
 	}
 
-	if out := runOK("migrate"); !strings.Contains(out, "applied 00001_api_keys.sql") {
-		t.Errorf("migrate output = %q, want the first migration applied", out)
+	if out := runOK("migrate"); !strings.Contains(out, "applied 00001_api_keys.sql") ||
+		!strings.Contains(out, "applied 00002_budgets_and_idempotency.sql") {
+		t.Errorf("migrate output = %q, want both migrations applied", out)
 	}
 	if out := runOK("migrate"); !strings.Contains(out, "nothing to apply") {
 		t.Errorf("second migrate output = %q, want nothing to apply", out)
 	}
 
 	out := runOK("keys", "create", "-name", "ci bot", "-rpm", "5", "-tpm", "500",
-		"-models", "mock-fast", "-config", "testdata/mock.yaml")
+		"-models", "mock-fast", "-config", "testdata/mock.yaml", "-budget", "2.50", "-period", "daily")
 	secret := ""
 	for f := range strings.FieldsSeq(out) {
 		if strings.HasPrefix(f, auth.Prefix) {
@@ -222,7 +228,7 @@ func TestMigrateAndKeysCommands(t *testing.T) {
 	}
 
 	list := runOK("keys", "list")
-	for _, want := range []string{"ci bot", auth.DisplayPrefix(secret), "mock-fast", "500"} {
+	for _, want := range []string{"ci bot", auth.DisplayPrefix(secret), "mock-fast", "500", "$2.50 daily"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("keys list does not show %q:\n%s", want, list)
 		}
@@ -235,7 +241,8 @@ func TestMigrateAndKeysCommands(t *testing.T) {
 	if out := runOK("keys", "revoke", "-id", id); !strings.Contains(out, "revoked") {
 		t.Errorf("keys revoke output = %q", out)
 	}
-	if list := runOK("keys", "list"); strings.Contains(strings.Split(list, "\n")[1], " - ") {
+	// The last column is the revocation time, "-" while there is none.
+	if list := runOK("keys", "list"); strings.HasSuffix(strings.TrimSpace(strings.Split(list, "\n")[1]), " -") {
 		t.Errorf("keys list doesn't show the revocation:\n%s", list)
 	}
 

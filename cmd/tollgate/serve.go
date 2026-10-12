@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/auth"
+	"github.com/ktripathi2281/tollgate/internal/budget"
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/idempotency"
 	"github.com/ktripathi2281/tollgate/internal/limiter"
 	"github.com/ktripathi2281/tollgate/internal/router"
 	"github.com/ktripathi2281/tollgate/internal/server"
@@ -52,11 +55,28 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	budgets := budget.New(db, cfg.Budget.HoldTTL, time.Now, logger)
+	idem := idempotency.New(db, cfg.Idempotency.LockFor, cfg.Idempotency.Retention,
+		cfg.Idempotency.MaxResponseBytes, time.Now, logger)
 	srv := server.New(cfg.Server, cfg.Timeouts, server.Deps{
-		Router:  r,
-		Keys:    auth.NewCache(db, cfg.Auth.CacheTTL, time.Now),
-		Limiter: limiter.New(time.Now),
-		Log:     logger,
+		Router:      r,
+		Keys:        auth.NewCache(db, cfg.Auth.CacheTTL, time.Now),
+		Limiter:     limiter.New(time.Now),
+		Budgets:     budgets,
+		Idempotency: idem,
+		Pricing:     cfg.Pricing,
+		Log:         logger,
+	})
+
+	// The sweeper releases expired holds and deletes expired idempotency
+	// records. It stops when serve returns, and serve waits for it before
+	// the deferred db.Close runs: defers run last first.
+	var sweeper sync.WaitGroup
+	defer sweeper.Wait()
+	sweepCtx, stopSweeping := context.WithCancel(ctx)
+	defer stopSweeping()
+	sweeper.Go(func() {
+		sweepEvery(sweepCtx, sweepInterval, func(ctx context.Context) { sweepOnce(ctx, budgets, idem, logger) })
 	})
 
 	var lc net.ListenConfig

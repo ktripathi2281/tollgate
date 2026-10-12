@@ -15,9 +15,10 @@ import (
 const usage = `Usage: tollgate <command> [flags]
 
 Commands:
-  serve    run the gateway
-  migrate  apply database migrations
-  keys     create, list and revoke API keys
+  serve      run the gateway
+  migrate    apply database migrations
+  keys       create, list and revoke API keys
+  reconcile  check every budget period against its holds
 
 The database comes from $DATABASE_URL. Run "tollgate <command> -h" for a
 command's flags.
@@ -57,6 +58,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		err = migrate(ctx, rest, stdout, stderr)
 	case "keys":
 		err = keys(ctx, rest, stdout, stderr)
+	case "reconcile":
+		err = reconcile(ctx, rest, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
