@@ -13,11 +13,13 @@ The spec is `docs/BRIEF.md`. It is long: before writing code, read the sections 
 ## Make targets
 
 - `make build`: static binary in `bin/`
-- `make test`: `go test -race ./...`
+- `make test`: `go test -race ./...`; Postgres tests run when `TOLLGATE_TEST_DATABASE_URL` is set (from `.env`)
 - `make lint`: golangci-lint (also checks gofmt and goimports)
 - `make fmt`: format the code
-- `make run`: build, then serve with `config.yaml`
-- `make migrate`, `make bench`, `make smoke`: added in M4, M7 and M3
+- `make generate`: regenerate sqlc code after changing a query or migration
+- `make db`: start the local Postgres (docker compose); `make migrate`: apply migrations
+- `make run`: build, then serve with `config.yaml` (needs `DATABASE_URL` and a key from `tollgate keys create`)
+- `make smoke`: real provider calls; `make bench`: added in M7
 
 ## Rules
 

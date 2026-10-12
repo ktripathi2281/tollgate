@@ -304,3 +304,51 @@ Non-streaming calls have only the total deadline, because there is no first toke
 The M5 budget hold prices its upper bound on the prompt with the same rule, target by target, and takes the largest. That is only an upper bound if crossing the threshold never lowers a price, which is why cheaper tier prices are rejected. Settling uses the prompt tokens the provider reports. If usage is estimated, the estimate picks the tier.
 
 **Rejected.** Always charging the higher price: most requests would be recorded at five times their cost. A list of tiers: no current price list has more than one threshold, and one tier is easier to read and validate. Capping prompts below the threshold: a client sending a long prompt should pay the long-context price, not get an error.
+
+## 35. Postgres access: pgx, sqlc and goose (M4)
+
+**Decision.** One `pgxpool` pool. sqlc generates typed queries into `internal/store/db`, reading the schema from the goose migrations themselves; the generated code is committed, and `make generate` rebuilds it. The migrations are embedded in the binary and applied only by `tollgate migrate`, under a Postgres advisory lock so that concurrent runs take turns. `serve` refuses to start while any migration is pending. Pool settings go in the `DATABASE_URL` query string (`pool_max_conns=10`), so the config file has no database section.
+
+**Rejected.** Migrating when `serve` starts: a schema change should be a deliberate step, and a failing migration would become a crash loop. A separate `schema.sql` for sqlc: two copies of the schema that can drift apart.
+
+## 36. Virtual keys (M4)
+
+**Decision.** A key is `tg_` plus 32 random bytes in lowercase base32, 55 characters in all. The database stores the SHA-256 hash (`bytea`, unique) and a display prefix of 11 characters (`tg_` and 40 bits of the secret). A key that isn't well formed is rejected before any lookup. `allowed_models` is NULL for every alias; an empty array is rejected by a CHECK, so "no restriction" has one spelling.
+
+A fast hash is enough because the secret is 256 random bits. Slow hashes like bcrypt protect low-entropy passwords from guessing; nothing can guess a 256-bit secret, and every request has to hash the key it presents. A slow hash would add tens of milliseconds to each cache miss for no gain.
+
+**Rejected.** base64url: its `-` and `_` break double-click selection. Hex: 64 characters for the same randomness.
+
+## 37. Key cache and revocation delay (M4)
+
+**Decision.** Keys found in the database are cached for `auth.cache_ttl`, default 30s and at most 5m. Revoked keys are cached as revoked. The revocation delay is therefore the TTL: a revoked key works for at most 30s more. Unknown keys and lookup failures aren't cached. A failed lookup is a 503 `auth_unavailable` with `Retry-After: 1`, not a 401, so a database outage doesn't look like a bad key, which clients don't retry.
+
+**Rejected.** Caching unknown keys: anyone could grow the cache by sending made-up keys. Each one costs one indexed lookup instead, bounded by the in-flight cap. Serving stale entries while the database is down: revocation would stop working for as long as the outage lasted. singleflight for concurrent misses: two lookups of the same key at once are rare and harmless.
+
+## 38. Rate limits: token buckets, reservations and refunds (M4)
+
+**Decision.** Each limit is a token bucket whose capacity is the per-minute limit. It refills continuously at limit/60 per second and starts full, so a key can spend a minute's allowance at once and then continue at the steady rate. Tokens are float64: refilling earns fractions, and nothing here is money.
+
+The registry holds one pair of buckets per key, under one mutex. During any call, at most once a minute, it drops the pairs whose buckets are both full. A new pair would be identical, so dropping one changes no decision. This means there is no background goroutine to own. Limits are passed in on each call, and a pair whose key's limits changed is resized. The server sees the registry through an interface, so a limiter shared between instances could replace it. Until then, limits apply per instance.
+
+Requests per minute are counted before the body is read, as in the pipeline, so a malformed request counts too. Tokens per minute are reserved after validation: the estimated prompt (about four characters per token) plus the request's maximum output. A deferred refund settles the reservation after the response is written, so every exit path settles it, panics included. The refund returns reserved minus used. "Used" is the provider's count, or an estimate if it reported none; a request that failed before producing anything used 0. If a request used more than it reserved, the difference is taken, and the bucket can go below zero.
+
+A request that needs more tokens than the whole TPM limit gets OpenAI's response for this case: 429, type `tokens`, code `rate_limit_exceeded`, "Request too large", and no `Retry-After`, since waiting won't help.
+
+**Rejected.**
+- An integer GCRA: exact, but harder to explain, and the brief asks for a token bucket.
+- A sweeper goroutine: one more goroutine to start, stop and test, for something a call can do in passing.
+- Refunds that never charge overuse: a key whose prompts are consistently underestimated could exceed its limit.
+- A 400 for a request too large for the limit: OpenAI clients expect a 429 there.
+
+## 39. Authentication responses (M4)
+
+**Decision.** Every path under `/v1/` needs a key, including unknown paths; `/healthz` doesn't. Only `Authorization: Bearer`, which is what OpenAI SDKs send; the scheme is case-insensitive. A missing, unknown or revoked key gets a 401 `invalid_api_key` with `WWW-Authenticate: Bearer`, and a message saying which. An alias the key may not use gets the same 404 as an alias that doesn't exist, in OpenAI's words: "does not exist or you do not have access to it". `/v1/models` lists only the aliases the key may use.
+
+**Rejected.** A 403 for a disallowed alias: it would tell a key which aliases exist.
+
+## 40. Postgres in tests (M4)
+
+**Decision.** Tests that need Postgres get a schema of their own in one database: `storetest` creates it, migrates it, points `search_path` at it through the URL, and drops it afterwards, so tests can run in parallel. They are skipped when `TOLLGATE_TEST_DATABASE_URL` is empty, except in CI (where GitHub sets `CI`): there a missing URL fails the test, so the database tests can't be skipped by accident. CI runs Postgres 18 as a service container. Locally, `docker-compose.yml` has only Postgres for now (`make db`); the rest of the compose file arrives in M7.
+
+**Rejected.** A build tag: the URL has to come from somewhere anyway, and a tag is easy to forget. testcontainers: another dependency, and it still needs Docker.
