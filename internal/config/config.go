@@ -29,14 +29,16 @@ import (
 // Config is the whole gateway configuration. Each milestone adds the sections
 // it needs.
 type Config struct {
-	Server    Server              `yaml:"server"`
-	Log       Log                 `yaml:"log"`
-	Timeouts  Timeouts            `yaml:"timeouts"`
-	Retry     Retry               `yaml:"retry"`
-	Breaker   Breaker             `yaml:"breaker"`
-	Auth      Auth                `yaml:"auth"`
-	Providers map[string]Provider `yaml:"providers"`
-	Models    map[string]Model    `yaml:"models"`
+	Server      Server              `yaml:"server"`
+	Log         Log                 `yaml:"log"`
+	Timeouts    Timeouts            `yaml:"timeouts"`
+	Retry       Retry               `yaml:"retry"`
+	Breaker     Breaker             `yaml:"breaker"`
+	Auth        Auth                `yaml:"auth"`
+	Budget      Budget              `yaml:"budget"`
+	Idempotency Idempotency         `yaml:"idempotency"`
+	Providers   map[string]Provider `yaml:"providers"`
+	Models      map[string]Model    `yaml:"models"`
 	// Pricing is keyed by "provider/model"; see PriceKey.
 	Pricing map[string]Price `yaml:"pricing"`
 }
@@ -110,6 +112,26 @@ type Auth struct {
 	// CacheTTL is how long a key looked up in the database is remembered.
 	// It is also how long a revoked key keeps working.
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+}
+
+// Budget configures spend budgets.
+type Budget struct {
+	// HoldTTL is how long a hold may stay unresolved before the sweeper
+	// releases it, like an expired card authorisation. It must outlast any
+	// request: timeouts.total plus server.shutdown_grace.
+	HoldTTL time.Duration `yaml:"hold_ttl"`
+}
+
+// Idempotency configures Idempotency-Key handling.
+type Idempotency struct {
+	// LockFor is how long a request owns its key before a retry may take
+	// it over as abandoned. It must be longer than timeouts.total.
+	LockFor time.Duration `yaml:"lock_for"`
+	// Retention is how long a completed response is kept for replay.
+	Retention time.Duration `yaml:"retention"`
+	// MaxResponseBytes caps the size of a stored response. A larger one
+	// completes the key without being stored, and can't be replayed.
+	MaxResponseBytes int `yaml:"max_response_bytes"`
 }
 
 // Provider configures one upstream provider. Type selects the
@@ -265,7 +287,13 @@ func Default() *Config {
 			FailureThreshold: 5,
 			OpenFor:          30 * time.Second,
 		},
-		Auth: Auth{CacheTTL: 30 * time.Second},
+		Auth:   Auth{CacheTTL: 30 * time.Second},
+		Budget: Budget{HoldTTL: 10 * time.Minute},
+		Idempotency: Idempotency{
+			LockFor:          6 * time.Minute,
+			Retention:        24 * time.Hour,
+			MaxResponseBytes: 1 << 20, // 1 MiB
+		},
 	}
 }
 
@@ -335,6 +363,7 @@ func (c *Config) validate() error {
 	c.validateTimeouts(&p)
 	c.validateRetry(&p)
 	c.validateAuth(&p)
+	c.validateMoney(&p)
 	c.validateProviders(&p)
 	c.validatePricing(&p)
 	c.validateModels(&p)
@@ -421,6 +450,29 @@ const maxCacheTTL = 5 * time.Minute
 func (c *Config) validateAuth(p *problems) {
 	if ttl := c.Auth.CacheTTL; ttl <= 0 || ttl > maxCacheTTL {
 		p.addf("auth.cache_ttl", "must be positive and at most %s (it is how long a revoked key keeps working), got %s", maxCacheTTL, ttl)
+	}
+}
+
+// validateMoney checks the budget and idempotency timings against the
+// longest a request can run, so that the sweeper never releases the hold
+// of a request that is still running, and a retry never takes over a key
+// whose request is still running (DECISIONS 3).
+func (c *Config) validateMoney(p *problems) {
+	longest := c.Timeouts.Total + c.Server.ShutdownGrace
+	if c.Budget.HoldTTL <= longest {
+		p.addf("budget.hold_ttl", "must be longer than timeouts.total plus server.shutdown_grace (%s), "+
+			"or the sweeper could release the hold of a running request; got %s", longest, c.Budget.HoldTTL)
+	}
+	i := c.Idempotency
+	if i.LockFor <= c.Timeouts.Total {
+		p.addf("idempotency.lock_for", "must be longer than timeouts.total (%s), "+
+			"or a retry could take over a request that is still running; got %s", c.Timeouts.Total, i.LockFor)
+	}
+	if i.Retention < i.LockFor {
+		p.addf("idempotency.retention", "must be at least idempotency.lock_for (%s), got %s", i.LockFor, i.Retention)
+	}
+	if i.MaxResponseBytes < 1 {
+		p.addf("idempotency.max_response_bytes", "must be at least 1, got %d", i.MaxResponseBytes)
 	}
 }
 
@@ -538,18 +590,30 @@ func (c *Config) validatePricing(p *problems) {
 	}
 }
 
+// MaxPrice caps a price: $10,000 per million tokens, about 200 times the
+// most expensive model today. With it, and usage.Cost's cap on token
+// counts, a cost can't overflow int64.
+const MaxPrice = 10_000 * money.PerUSD
+
 // parseRates parses an input and an output price, recording a problem for
 // each one that is invalid. ok reports whether both parsed.
 func parseRates(p *problems, field, input, output string) (in, out money.Micros, ok bool) {
-	in, inErr := money.ParseUSD(input)
-	if inErr != nil {
-		p.addf(field+".input", "%v", inErr)
+	in, inOK := parseRate(p, field+".input", input)
+	out, outOK := parseRate(p, field+".output", output)
+	return in, out, inOK && outOK
+}
+
+func parseRate(p *problems, field, s string) (money.Micros, bool) {
+	m, err := money.ParseUSD(s)
+	if err != nil {
+		p.addf(field, "%v", err)
+		return 0, false
 	}
-	out, outErr := money.ParseUSD(output)
-	if outErr != nil {
-		p.addf(field+".output", "%v", outErr)
+	if m > MaxPrice {
+		p.addf(field, "must be at most %q USD per million tokens, got %q", "10000", s)
+		return 0, false
 	}
-	return in, out, inErr == nil && outErr == nil
+	return m, true
 }
 
 // validateLongContext parses a price's long-context tier, through its
