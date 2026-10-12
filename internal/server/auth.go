@@ -44,7 +44,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented, ok := bearerToken(r)
 		if !ok {
-			unauthorized(w, "No API key provided. Send it in the Authorization header: `Authorization: Bearer <key>`.")
+			unauthorized(w, "No API key provided. Send it in an Authorization header using Bearer auth: `Authorization: Bearer YOUR_KEY`.")
 			return
 		}
 		key, err := s.keys.Authenticate(r.Context(), presented)
