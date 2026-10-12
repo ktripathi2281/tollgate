@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M3, real providers and routing. Built; waiting for the smoke run and the M3 exercise.
+**Current milestone:** M3, real providers and routing. Done except the manual smoke run, which waits for `ANTHROPIC_API_KEY` in `.env`. Waiting for the go-ahead for M4.
 
 ## Done
 
@@ -22,8 +22,8 @@
 
 ## Next
 
-- Maintainer: put `ANTHROPIC_API_KEY` in `.env` (from `.env.example`); implement `backoff`; review M3.
-- Then: run `make smoke`, and stop for M4.
+- Maintainer: review M3; put `ANTHROPIC_API_KEY` in `.env` (from `.env.example`) whenever convenient, then run `make smoke`.
+- Then: M4.
 
 ## Open questions
 
@@ -31,4 +31,4 @@
 
 ## Pending exercises
 
-- **M3: `backoff`** in `internal/router/backoff.go`. Tests: `internal/router/backoff_test.go` and `TestRouterWaitsTheBackoff` (internal/router). Until it's done, `make test` (and CI) fails in `internal/router`, and an unavailable target is retried at once instead of after a backoff.
+None. The M3 exercise, `backoff`, was written on request.
