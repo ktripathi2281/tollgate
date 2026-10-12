@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M5, the money path. Built; waiting for the M5 exercise and the maintainer's review.
+**Current milestone:** M5, the money path. Done; waiting for the go-ahead for M6.
 
 ## Done
 
@@ -17,18 +17,18 @@
 
 | Check | Status |
 |---|---|
-| 200 concurrent requests, budget fits exactly K holds: K succeed, the rest 402, invariants hold | waits for the exercise: `TestBudgetAdmitsExactlyKOf200` (internal/server) |
-| Every exit path (success, upstream failure, failure after the hold, client disconnect, panic) leaves no hold held | waits for the exercise: `TestEveryExitPathResolvesTheHold` (internal/server) |
+| 200 concurrent requests, budget fits exactly K holds: K succeed, the rest 402, invariants hold | pass: `TestBudgetAdmitsExactlyKOf200` (internal/server) |
+| Every exit path (success, upstream failure, failure after the hold, client disconnect, panic) leaves no hold held | pass: `TestEveryExitPathResolvesTheHold` (internal/server) |
 | A hold orphaned by a simulated crash is released by the sweeper | pass: `TestSweeperAndLateSettle` (internal/budget) |
 | Double settle and settle-after-release are no-ops; a late settle is logged and counted | pass: `TestResolvingTwiceChangesNothing`, `TestSweeperAndLateSettle` (internal/budget) |
 | Startup rejects a `hold_ttl` or idempotency lock too short for `timeouts.total` | pass: `TestParseRejectsTimingsTooShortForARequest` (internal/config) |
 | A hold placed before a period boundary settles into its own period; the new period starts at zero | pass: `TestPeriodBoundary` (internal/budget) |
-| Idempotency: replay, 422, 409, retry after failure, takeover after `locked_until`, N duplicates make one upstream call | pass: `TestIdempotentStreamReplay`, `TestIdempotencyMismatchAndBadKey`, `TestConcurrentDuplicatesCallTheProviderOnce`, `TestRetryAfterAFailure`, `TestTakeoverOfAnAbandonedKey` (internal/server), and `internal/idempotency`; `TestIdempotentReplay` waits for the exercise |
-| `tollgate reconcile` passes after all of the above and fails when a row is tampered with | pass: `TestReconcile` (cmd/tollgate); every money test ends with the same check (`storetest.CheckBudgets`); `TestServeSpendsABudget` (end to end) waits for the exercise |
+| Idempotency: replay, 422, 409, retry after failure, takeover after `locked_until`, N duplicates make one upstream call | pass: `TestIdempotentStreamReplay`, `TestIdempotencyMismatchAndBadKey`, `TestConcurrentDuplicatesCallTheProviderOnce`, `TestRetryAfterAFailure`, `TestTakeoverOfAnAbandonedKey`, `TestIdempotentReplay` (internal/server), and `internal/idempotency` |
+| `tollgate reconcile` passes after all of the above and fails when a row is tampered with | pass: `TestReconcile` (cmd/tollgate); every money test ends with the same check (`storetest.CheckBudgets`); `TestServeSpendsABudget` (end to end) |
 
 ## Next
 
-- Maintainer: implement `usage.Cost`; review M5.
+- Maintainer: review M5.
 - Then: M6, logs and observability.
 
 ## Open questions
@@ -37,4 +37,4 @@
 
 ## Pending exercises
 
-- **M5: `usage.Cost`** in `internal/usage/cost.go`. Tests: `internal/usage/cost_test.go`, and in `internal/server`: `TestWorstCaseOfChatBody`, `TestBudgetAdmitsExactlyKOf200`, `TestBudgetExceededResponse`, `TestEveryExitPathResolvesTheHold`, `TestOutcomeIsSavedBeforeTheResponse`, `TestIdempotentReplay`; in `cmd/tollgate`: `TestServeSpendsABudget`. Until it's done, every request costs nothing, so no budget holds anything, and `make test` (and CI) fails there.
+None. The M5 exercise, `usage.Cost`, was written on request.
