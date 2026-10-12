@@ -16,6 +16,22 @@ type Micros int64
 // PerUSD is the number of Micros in one US dollar.
 const PerUSD Micros = 1_000_000
 
+// String formats m in US dollars, with as many decimal places as it needs
+// and at least two: "$1.50", "$0.000125", "-$3.00".
+func (m Micros) String() string {
+	sign := ""
+	// Work in uint64 so that the most negative amount can be negated.
+	u := uint64(m)
+	if m < 0 {
+		sign, u = "-", -u
+	}
+	frac := strings.TrimRight(fmt.Sprintf("%06d", u%uint64(PerUSD)), "0")
+	for len(frac) < 2 {
+		frac += "0"
+	}
+	return fmt.Sprintf("%s$%d.%s", sign, u/uint64(PerUSD), frac)
+}
+
 // ParseUSD parses a non-negative decimal USD amount such as "0.075" or "15"
 // into Micros. It accepts plain digits with at most one decimal point and at
 // most six digits after it, with at least one digit on each side of the

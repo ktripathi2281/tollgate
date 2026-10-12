@@ -70,3 +70,25 @@ func TestParseUSDRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestMicrosString(t *testing.T) {
+	tests := []struct {
+		m    Micros
+		want string
+	}{
+		{0, "$0.00"},
+		{1, "$0.000001"},
+		{125, "$0.000125"},
+		{500_000, "$0.50"},
+		{1_500_000, "$1.50"},
+		{10 * PerUSD, "$10.00"},
+		{1_234_567, "$1.234567"},
+		{-3 * PerUSD, "-$3.00"},
+		{math.MinInt64, "-$9223372036854.775808"},
+	}
+	for _, tt := range tests {
+		if got := tt.m.String(); got != tt.want {
+			t.Errorf("Micros(%d).String() = %q, want %q", int64(tt.m), got, tt.want)
+		}
+	}
+}
