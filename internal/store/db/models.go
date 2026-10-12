@@ -18,4 +18,39 @@ type ApiKey struct {
 	AllowedModels []string
 	CreatedAt     time.Time
 	RevokedAt     *time.Time
+	BudgetMicros  *int64
+	BudgetPeriod  *string
+}
+
+type BudgetHold struct {
+	ID            int64
+	KeyID         int64
+	PeriodStart   time.Time
+	RequestID     string
+	AmountMicros  int64
+	SettledMicros *int64
+	Status        string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	ResolvedAt    *time.Time
+}
+
+type BudgetPeriod struct {
+	KeyID       int64
+	PeriodStart time.Time
+	SpentMicros int64
+	HeldMicros  int64
+}
+
+type IdempotencyRecord struct {
+	KeyID          int64
+	IdemKey        string
+	RequestHash    []byte
+	RequestID      string
+	Status         string
+	ResponseStatus *int32
+	ResponseBody   []byte
+	LockedUntil    time.Time
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
 }

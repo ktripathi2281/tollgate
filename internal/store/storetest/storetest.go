@@ -63,12 +63,57 @@ func EmptySchemaURL(t testing.TB) string {
 // test ends.
 func Open(t testing.TB) *store.Store {
 	t.Helper()
-	s, err := store.Open(context.Background(), URL(t))
+	s, _ := OpenWithURL(t)
+	return s
+}
+
+// OpenWithURL is Open, and also returns the schema's URL.
+func OpenWithURL(t testing.TB) (*store.Store, string) {
+	t.Helper()
+	u := URL(t)
+	s, err := store.Open(context.Background(), u)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	return s
+	return s, u
+}
+
+// Int runs a query that returns one integer, such as a count, on the
+// database at dbURL.
+func Int(t testing.TB, dbURL, sql string, args ...any) int64 {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect to the test database: %v", err)
+	}
+	defer conn.Close(ctx)
+	var n int64
+	if err := conn.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+	return n
+}
+
+// CheckBudgets fails the test unless every budget period agrees with its
+// holds, as `tollgate reconcile` checks: invariants 1 and 2 in brief
+// section 9.1. It also fails if any hold is still held, since a test calls
+// it once every request has finished.
+func CheckBudgets(t testing.TB, s *store.Store, dbURL string) {
+	t.Helper()
+	checks, err := s.ReconcileBudgets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range checks {
+		if !c.OK() {
+			t.Errorf("budget period doesn't match its holds: %+v", c)
+		}
+	}
+	if n := Int(t, dbURL, "SELECT count(*) FROM budget_holds WHERE status = 'held'"); n != 0 {
+		t.Errorf("%d holds are still held", n)
+	}
 }
 
 // exec runs one statement on a connection of its own.

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+
+	"github.com/ktripathi2281/tollgate/internal/money"
 )
 
 // Prefix starts every key, so a leaked one is easy to recognise, for
@@ -46,7 +48,11 @@ type Key struct {
 	RPM           int      // requests per minute
 	TPM           int      // tokens per minute
 	AllowedModels []string // the aliases it may use; nil allows every alias
-	Revoked       bool
+	// Budget is how much the key may spend per BudgetPeriod ("daily" or
+	// "monthly", in UTC). 0 means no budget.
+	Budget       money.Micros
+	BudgetPeriod string
+	Revoked      bool
 }
 
 // Allows reports whether the key may use the alias.

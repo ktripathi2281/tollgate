@@ -1,15 +1,15 @@
 -- name: CreateAPIKey :one
-INSERT INTO api_keys (name, key_hash, key_prefix, rpm, tpm, allowed_models)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO api_keys (name, key_hash, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, created_at;
 
 -- name: GetAPIKeyByHash :one
-SELECT id, name, key_prefix, rpm, tpm, allowed_models, revoked_at
+SELECT id, name, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period, revoked_at
 FROM api_keys
 WHERE key_hash = $1;
 
 -- name: ListAPIKeys :many
-SELECT id, name, key_prefix, rpm, tpm, allowed_models, created_at, revoked_at
+SELECT id, name, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period, created_at, revoked_at
 FROM api_keys
 ORDER BY id;
 

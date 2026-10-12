@@ -11,8 +11,8 @@ import (
 )
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (name, key_hash, key_prefix, rpm, tpm, allowed_models)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO api_keys (name, key_hash, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, created_at
 `
 
@@ -23,6 +23,8 @@ type CreateAPIKeyParams struct {
 	Rpm           int32
 	Tpm           int32
 	AllowedModels []string
+	BudgetMicros  *int64
+	BudgetPeriod  *string
 }
 
 type CreateAPIKeyRow struct {
@@ -38,6 +40,8 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		arg.Rpm,
 		arg.Tpm,
 		arg.AllowedModels,
+		arg.BudgetMicros,
+		arg.BudgetPeriod,
 	)
 	var i CreateAPIKeyRow
 	err := row.Scan(&i.ID, &i.CreatedAt)
@@ -45,7 +49,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 }
 
 const getAPIKeyByHash = `-- name: GetAPIKeyByHash :one
-SELECT id, name, key_prefix, rpm, tpm, allowed_models, revoked_at
+SELECT id, name, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period, revoked_at
 FROM api_keys
 WHERE key_hash = $1
 `
@@ -57,6 +61,8 @@ type GetAPIKeyByHashRow struct {
 	Rpm           int32
 	Tpm           int32
 	AllowedModels []string
+	BudgetMicros  *int64
+	BudgetPeriod  *string
 	RevokedAt     *time.Time
 }
 
@@ -70,13 +76,15 @@ func (q *Queries) GetAPIKeyByHash(ctx context.Context, keyHash []byte) (GetAPIKe
 		&i.Rpm,
 		&i.Tpm,
 		&i.AllowedModels,
+		&i.BudgetMicros,
+		&i.BudgetPeriod,
 		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const listAPIKeys = `-- name: ListAPIKeys :many
-SELECT id, name, key_prefix, rpm, tpm, allowed_models, created_at, revoked_at
+SELECT id, name, key_prefix, rpm, tpm, allowed_models, budget_micros, budget_period, created_at, revoked_at
 FROM api_keys
 ORDER BY id
 `
@@ -88,6 +96,8 @@ type ListAPIKeysRow struct {
 	Rpm           int32
 	Tpm           int32
 	AllowedModels []string
+	BudgetMicros  *int64
+	BudgetPeriod  *string
 	CreatedAt     time.Time
 	RevokedAt     *time.Time
 }
@@ -108,6 +118,8 @@ func (q *Queries) ListAPIKeys(ctx context.Context) ([]ListAPIKeysRow, error) {
 			&i.Rpm,
 			&i.Tpm,
 			&i.AllowedModels,
+			&i.BudgetMicros,
+			&i.BudgetPeriod,
 			&i.CreatedAt,
 			&i.RevokedAt,
 		); err != nil {
