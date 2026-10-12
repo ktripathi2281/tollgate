@@ -19,12 +19,17 @@ const MaxBilledTokens = 100_000_000
 // of a micro-dollar is charged as a whole one. Counts below zero count as
 // zero, and counts above MaxBilledTokens as MaxBilledTokens.
 func Cost(price config.Price, promptTokens, completionTokens int) money.Micros {
-	// EXERCISE: implement Cost; cost_test.go has every case it must pass.
-	// Hint: clamp both counts with min and max, get the rates from
-	// price.Rates, then divide the sum of count × rate by 1,000,000, rounding up.
-	_, _, _ = price, promptTokens, completionTokens
-	return 0 // until it's written, every request is free, so no budget holds anything
+	prompt := min(max(promptTokens, 0), MaxBilledTokens)
+	completion := min(max(completionTokens, 0), MaxBilledTokens)
+	in, out := price.Rates(prompt)
+	total := money.Micros(prompt)*in + money.Micros(completion)*out
+	// Rounding once, on the total: adding one less than the divisor before
+	// dividing rounds up.
+	return (total + perMillion - 1) / perMillion
 }
+
+// perMillion converts a price per million tokens to a price per token.
+const perMillion = 1_000_000
 
 // messageOverhead is a bound on what a chat format adds to each message,
 // in tokens: role markers and separators. Real formats add 3 to 7.
