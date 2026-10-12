@@ -97,6 +97,8 @@ func TestServeSpendsABudget(t *testing.T) {
 	}
 	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n", dbURL)
 
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
 	post := func() int {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+c.addr+"/v1/chat/completions",
 			strings.NewReader(`{"model": "mock-fast", "messages": [{"role": "user", "content": "hi"}]}`))
@@ -104,11 +106,12 @@ func TestServeSpendsABudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("Authorization", "Bearer "+secret)
-		resp, err := http.DefaultTransport.RoundTrip(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return resp.StatusCode
 	}
 	if code := post(); code != http.StatusOK {
@@ -117,6 +120,9 @@ func TestServeSpendsABudget(t *testing.T) {
 	if code := post(); code != http.StatusPaymentRequired {
 		t.Errorf("second request: %d, want 402", code)
 	}
+	// Close the client's connections first. The server counts an open
+	// connection as busy, and shutdown would wait for it.
+	client.CloseIdleConnections()
 	if _, err := c.terminate(t); err != nil {
 		t.Errorf("child exited with %v\nstderr:\n%s", err, c.stderr)
 	}
