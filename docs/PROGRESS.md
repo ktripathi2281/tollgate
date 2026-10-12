@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M4, keys and limits. Built; waiting for the M4 exercise and the maintainer's review.
+**Current milestone:** M4, keys and limits. Done; waiting for the go-ahead for M5.
 
 ## Done
 
@@ -18,12 +18,12 @@
 |---|---|
 | 401 without a valid key | pass: `TestUnauthenticatedRequestsGet401` (internal/server), `TestServeExitsCleanlyOnSIGTERM` (cmd/tollgate, end to end) |
 | A revoked key stops working within the cache TTL | pass: `TestCacheRevocationTakesEffectWithinTTL` (internal/auth) |
-| N goroutines hammering one key under a frozen clock: exactly what the bucket allows is admitted | waits for the exercise: `TestRegistryAdmitsExactlyTheLimitUnderContention` (internal/limiter) |
+| N goroutines hammering one key under a frozen clock: exactly what the bucket allows is admitted | pass: `TestRegistryAdmitsExactlyTheLimitUnderContention` (internal/limiter) |
 | Token reservations refunded on success, failure and cancellation | pass: `TestTokenReservationsAreRefunded` (internal/server) |
 
 ## Next
 
-- Maintainer: implement `bucket.take`; review M4.
+- Maintainer: review M4.
 - Then: M5, the money path.
 
 ## Open questions
@@ -32,4 +32,4 @@
 
 ## Pending exercises
 
-- **M4: `bucket.take`** in `internal/limiter/bucket.go`. Tests: `internal/limiter/bucket_test.go`, every registry test in `internal/limiter`, and `TestRequestsPerMinute` and `TestTokensPerMinute` (internal/server). Until it's done, `make test` (and CI) fails there, and the stub admits every request, so no rate limit applies.
+None. The M4 exercise, `bucket.take`, was written on request.
