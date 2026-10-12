@@ -3,6 +3,7 @@
 package limiter
 
 import (
+	"math"
 	"time"
 )
 
@@ -44,11 +45,14 @@ func (b *bucket) refill(now time.Time) {
 // them, assuming nothing else takes any first. n must be positive and no
 // more than the capacity.
 func (b *bucket) take(now time.Time, n float64) (wait time.Duration, ok bool) {
-	// EXERCISE: implement take; bucket_test.go has every case it must pass.
-	// Hint: refill first. If n tokens are missing, the wait is missing/perSec
-	// seconds, rounded up to a whole nanosecond with math.Ceil.
-	_, _ = now, n
-	return 0, true // until it's written, every request is allowed
+	b.refill(now)
+	if b.tokens >= n {
+		b.tokens -= n
+		return 0, true
+	}
+	// Rounding up means that waiting exactly this long is always enough.
+	missing := n - b.tokens
+	return time.Duration(math.Ceil(missing / b.perSec * float64(time.Second))), false
 }
 
 // give returns n tokens to the bucket, up to its capacity. A negative n
