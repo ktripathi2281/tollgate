@@ -352,3 +352,102 @@ A request that needs more tokens than the whole TPM limit gets OpenAI's response
 **Decision.** Tests that need Postgres get a schema of their own in one database: `storetest` creates it, migrates it, points `search_path` at it through the URL, and drops it afterwards, so tests can run in parallel. They are skipped when `TOLLGATE_TEST_DATABASE_URL` is empty, except in CI (where GitHub sets `CI`): there a missing URL fails the test, so the database tests can't be skipped by accident. CI runs Postgres 18 as a service container. Locally, `docker-compose.yml` has only Postgres for now (`make db`); the rest of the compose file arrives in M7.
 
 **Rejected.** A build tag: the URL has to come from somewhere anyway, and a tag is easy to forget. testcontainers: another dependency, and it still needs Docker.
+
+## 41. Cost arithmetic (M5)
+
+**Decision.** `usage.Cost` multiplies each token count by its rate in micro-USD per million tokens, adds the two, and divides by a million once, rounding up. Rounding the total once, not each part, keeps the error under one micro-dollar per request. Overflow can't happen:
+- prices are capped at $10,000 per million tokens (`config.MaxPrice`, about 200 times the most expensive model today);
+- `Cost` treats token counts above 100 million as 100 million.
+
+At both caps, a part is 1e18 and the sum stays under `int64`'s 9.2e18. A request whose worst case costs nothing, such as one on a model priced at zero, places no hold.
+
+**Rejected.** `math/big` or 128-bit arithmetic: slower and harder to read, to handle inputs no real request produces.
+
+## 42. Holds: one transaction, the gateway's clock (M5)
+
+**Decision.** A hold is one transaction:
+1. create the period's row if it's missing;
+2. `UPDATE budget_periods SET held = held + amount WHERE spent + held + amount <= budget`;
+3. insert the hold, unless step 2 changed no row, in which case the request gets a 402.
+
+The UPDATE locks the period's row, so concurrent holds for one key take turns, and each re-checks the condition against the previous one's result. Invariant 3 holds without `SERIALIZABLE`.
+
+The hold amount is the largest `Cost(InputBound(messages), maxTokens)` over the alias's targets. Settle and release are guarded by `WHERE status = 'held'`, and the database rejects a row whose status disagrees with its cost or resolution time. Every timestamp comes from the gateway's clock, not `now()` in SQL, so tests can cross a period boundary or expire a hold without waiting. A hold settles into the period it was placed in.
+
+A failed settle or release is retried twice, 100 ms apart; retrying is safe because both are no-ops on a resolved hold. Settle failures, late settles and swept holds are counted in `budget.Stats`, which M6 will export as metrics.
+
+**Rejected.** `SERIALIZABLE` transactions: they would need retry loops for serialization failures, where one row lock does the job. `now()` in SQL: the tests for expiry and period boundaries would need real waits.
+
+## 43. What a request owes when it doesn't finish (M5)
+
+**Decision.**
+- A request that failed before producing anything has its hold released.
+- A stream that failed, or whose client left, after content started is settled with its usage: the provider's count if it sent one, otherwise the estimate of the prompt plus the text so far.
+- Earlier failed attempts in a retry or fallback aren't charged, because the gateway doesn't know what they used.
+
+**Rejected.** Releasing every failed request: a stream cut off after a thousand tokens has still been paid for. Charging the whole hold for a failure: that charges for tokens that were never generated.
+
+This is a documented limitation: tokens used by failed attempts are lost from the books. Reconciling against the providers' own usage reports is a stretch goal.
+
+## 44. Persisting before responding, and the unwind (M5)
+
+**Decision.** `accounting` is a per-request struct that holds what the request has taken: the idempotency lock (step 6), the token reservation (step 7) and the hold (step 8).
+- Each one gets a deferred release registered right after it is taken. Defers run in reverse order, which is the unwind rule, panics included.
+- Every normal path calls `finish` before writing anything: it settles or releases the hold, then completes or removes the idempotency record. The deferred releases then find nothing left to do.
+- A stream completes its record, with the assembled completion, before sending `[DONE]`.
+- These writes use `context.WithoutCancel` with a 10s timeout, so a client that hangs up can't stop its hold being settled.
+
+A test checks that when the first byte of a response goes out, the hold is already settled and the record completed.
+
+**Rejected.** `defer` alone: deferred calls run after the response has been written, which is the double-charge window that DECISIONS 2 closes.
+
+## 45. Idempotency keys (M5)
+
+**Decision.** The header is read as a Structured Field string (`"abc"`), or as a bare value, which many clients send; it must be 1 to 255 printable ASCII characters. Records are scoped to the API key. A request is identified by the SHA-256 of its raw body, so the same JSON serialised differently, with other spacing or key order, counts as a different request and gets a 422. Clients that retry by resending the same bytes, as SDKs do, are unaffected.
+
+A record belongs to the `request_id` that claimed it. Only that request can complete or remove it, so a request whose lock was taken over can't overwrite its successor's work. A record can be taken over when it is past its retention, or when it is still in progress, with the same body hash, after `locked_until`: its request was abandoned. While a request is running, others with the key get 409 with `Retry-After: 1`. A replay sends the stored body with `Idempotent-Replayed: true` and `X-Tollgate-Attempts: 0`, with no provider call, reservation or hold. It still counts against requests per minute, because that check runs before the body is read.
+
+Streams are stored assembled, as a `chat.completion`, and replayed as a minimal stream: role, the whole reply in one content event, finish, usage if requested, `[DONE]`.
+
+The draft says a retry should get the stored result "whether success or error". Only successes are stored here, as the brief says. Replaying a 502 or 503 would make retrying with the same key pointless, and every failure the gateway returns after step 6 is one a retry might fix.
+
+A response over `max_response_bytes` completes the record without a body. A retry then gets a 422 saying it can't be replayed.
+
+**Rejected.** Removing an oversized record: a retry would run the request, and charge for it, a second time. A 409 for one: 409 means "wait", and waiting can't help.
+
+## 46. The sweeper (M5)
+
+**Decision.** `serve` runs one goroutine that sweeps at start and then every minute until shutdown:
+- it releases expired holds that are still held, in batches of 100;
+- it deletes idempotency records past their retention.
+
+`serve` waits for the goroutine before closing the database. A hold is therefore released between `hold_ttl` and `hold_ttl` plus a minute after it was placed.
+
+**Rejected.** A database job such as `pg_cron`: an extension the hosted Postgres may not offer, and logic outside the codebase.
+
+## 47. Reconcile (M5)
+
+**Decision.** `tollgate reconcile` reads every budget period with the sums of its held and settled holds in one SQL statement, which sees one snapshot, so running requests can't make it report a false mismatch. It prints each mismatch and exits non-zero if there is any. Invariants 3 and 4 aren't checked there:
+- invariant 3 is enforced by the conditional UPDATE when a hold is placed, and tested with 200 concurrent requests;
+- invariant 4 is enforced by the status guard and the CHECK constraints, and tested on every exit path.
+
+## 48. The migration lock is per schema (M5)
+
+**Context.** goose makes concurrent migrations take turns with a Postgres advisory lock. With its default lock ID, the parallel tests' schemas all waited on one lock, and goose retries a busy lock only every 5 seconds: the suite took 20s.
+
+**Decision.** The lock ID is a hash of the schema's name. Runs against one schema still take turns; runs against different schemas don't wait for each other.
+
+## 49. Responses for budgets and idempotency (M5)
+
+**Decision.**
+
+| Case | Status | Type | Code |
+|---|---|---|---|
+| Budget can't cover the request | 402 | `insufficient_quota` (OpenAI's) | `insufficient_quota` |
+| Request still running | 409, `Retry-After` | `invalid_request_error` | `idempotency_key_in_use` |
+| Key used with another body, or can't be replayed | 422 | `invalid_request_error` | `idempotency_key_reused` |
+| Malformed key | 400 | `invalid_request_error` | `invalid_idempotency_key` |
+| Budget check failed | 503 | `server_error` | `budget_unavailable` |
+| Idempotency check failed | 503 | `server_error` | `idempotency_unavailable` |
+
+The 402 message names the budget, the request's worst case and when the period resets.
