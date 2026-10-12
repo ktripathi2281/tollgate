@@ -30,7 +30,12 @@ func routedServer(t *testing.T, providers map[string]provider.Provider, targets 
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	s := New(cfg.Server, cfg.Timeouts, r, slog.New(slog.NewJSONHandler(&logs, nil)))
+	s := New(cfg.Server, cfg.Timeouts, Deps{
+		Router:  r,
+		Keys:    newFakeKeys(),
+		Limiter: &fakeLimiter{},
+		Log:     slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
 	s.now = func() time.Time { return fixedTime }
 	return s, &logs
 }

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -60,19 +59,21 @@ func testServerWith(t *testing.T, p provider.Provider, mutate func(*config.Serve
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(cfg, timeouts, r, slog.New(slog.DiscardHandler))
+	s := New(cfg, timeouts, Deps{
+		Router:  r,
+		Keys:    newFakeKeys(),
+		Limiter: &fakeLimiter{},
+		Log:     slog.New(slog.DiscardHandler),
+	})
 	s.now = func() time.Time { return fixedTime }
 	s.started = fixedTime
 	return s
 }
 
-// do sends a request through the server's full handler chain, without a
-// network. It is safe to call from several goroutines.
+// do sends a request with the test key through the server's full handler
+// chain, without a network. It is safe to call from several goroutines.
 func do(ctx context.Context, s *Server, method, path, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequestWithContext(ctx, method, path, strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	s.http.Handler.ServeHTTP(rec, req)
-	return rec
+	return doAs(ctx, s, "Bearer "+testSecret, method, path, body)
 }
 
 func listen(t *testing.T) net.Listener {

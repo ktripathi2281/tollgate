@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"time"
 
+	"github.com/ktripathi2281/tollgate/internal/auth"
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/limiter"
 	"github.com/ktripathi2281/tollgate/internal/router"
 	"github.com/ktripathi2281/tollgate/internal/server"
 )
@@ -38,6 +41,24 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	// The database holds the API keys. The gateway won't start against a
+	// schema its queries don't match.
+	db, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.CheckSchema(ctx); err != nil {
+		return err
+	}
+
+	srv := server.New(cfg.Server, cfg.Timeouts, server.Deps{
+		Router:  r,
+		Keys:    auth.NewCache(db, cfg.Auth.CacheTTL, time.Now),
+		Limiter: limiter.New(time.Now),
+		Log:     logger,
+	})
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Server.Addr)
 	if err != nil {
@@ -45,7 +66,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	logger.Info("listening", "addr", ln.Addr().String())
 
-	if err := server.New(cfg.Server, cfg.Timeouts, r, logger).Serve(ctx, ln); err != nil {
+	if err := srv.Serve(ctx, ln); err != nil {
 		return err
 	}
 	logger.Info("shutdown complete")

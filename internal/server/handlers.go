@@ -8,12 +8,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/api"
 	"github.com/ktripathi2281/tollgate/internal/provider"
 	"github.com/ktripathi2281/tollgate/internal/router"
+	"github.com/ktripathi2281/tollgate/internal/usage"
 )
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -23,10 +25,12 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleChatCompletions serves POST /v1/chat/completions. The steps follow
-// the request pipeline in brief section 5; auth, limits, idempotency and
-// budgets slot in between them in later milestones.
+// the request pipeline in brief section 5. Authentication and the
+// requests-per-minute limit have already run, as middleware; idempotency
+// and budgets slot in between these steps in a later milestone.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	received := s.now()
+	key := keyFrom(r.Context())
 
 	// Parse and validate the body, size-limited.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes))
@@ -49,11 +53,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An alias the key may not use looks the same as one that doesn't
+	// exist, so a key can't discover what other keys can use.
 	alias, ok := s.router.Alias(req.Model)
-	if !ok {
+	if !ok || !key.Allows(alias.Name) {
 		api.WriteError(w, &api.Error{
 			Status: http.StatusNotFound, Type: api.TypeInvalidRequest, Code: api.CodeModelNotFound, Param: "model",
-			Message: fmt.Sprintf("The model `%s` does not exist.", req.Model),
+			Message: fmt.Sprintf("The model `%s` does not exist or you do not have access to it.", req.Model),
 		})
 		return
 	}
@@ -73,6 +79,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserve tokens per minute (pipeline step 7): the estimated prompt
+	// plus the most the reply may use. The deferred refund gives back what
+	// the request didn't use once the response is written (step 12), on
+	// every exit path: success, failure, a client that went away, or a
+	// panic. used stays 0 unless tokens were spent.
+	reserved := usage.EstimatePrompt(req.Messages) + maxTokens
+	if apiErr := s.reserveTokens(key, reserved); apiErr != nil {
+		api.WriteError(w, apiErr)
+		return
+	}
+	used := 0
+	defer func() { s.limiter.RefundTokens(key.ID, limitsOf(key), reserved, used) }()
+
 	creq := provider.ChatRequest{
 		Messages:    req.Messages,
 		MaxTokens:   maxTokens,
@@ -81,7 +100,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Stop:        req.Stop,
 	}
 	if req.Stream {
-		s.streamChat(w, r, alias, creq, req.IncludeUsage, received)
+		used = s.streamChat(w, r, alias, creq, req.IncludeUsage, received)
 		return
 	}
 
@@ -97,6 +116,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, _ := usageOrEstimate(resp.Usage, creq, resp.Content)
+	used = u.PromptTokens + u.CompletionTokens
 	api.WriteJSON(w, http.StatusOK, api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp, u))
 }
 
@@ -222,8 +242,11 @@ func (s *Server) logTries(ctx context.Context, alias string, res router.Result, 
 }
 
 // handleModels serves GET /v1/models: the configured aliases.
-func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	api.WriteJSON(w, http.StatusOK, api.NewModelList(s.router.Names(), s.started))
+// Only the aliases the request's key may use are listed.
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	key := keyFrom(r.Context())
+	names := slices.DeleteFunc(s.router.Names(), func(alias string) bool { return !key.Allows(alias) })
+	api.WriteJSON(w, http.StatusOK, api.NewModelList(names, s.started))
 }
 
 // handleUnknown answers any other /v1/ path with OpenAI's 404 error.

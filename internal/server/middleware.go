@@ -26,7 +26,10 @@ const (
 // other package can read or overwrite them by accident.
 type ctxKey int
 
-const requestIDKey ctxKey = iota
+const (
+	requestIDKey ctxKey = iota
+	apiKeyKey
+)
 
 // RequestID returns the request ID stored in ctx, or "" if there is none.
 func RequestID(ctx context.Context) string {

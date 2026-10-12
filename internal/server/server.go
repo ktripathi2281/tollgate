@@ -27,19 +27,31 @@ type Server struct {
 	timeouts config.Timeouts
 	log      *slog.Logger
 	router   *router.Router
+	keys     Authenticator
+	limiter  Limiter
 	now      func() time.Time // the clock for response timestamps; tests replace it
 	started  time.Time
 	http     *http.Server
 	handlers sync.WaitGroup // requests being handled, so shutdown can wait for them
 }
 
+// Deps are the parts the server is built from, besides its config.
+type Deps struct {
+	Router  *router.Router
+	Keys    Authenticator
+	Limiter Limiter
+	Log     *slog.Logger
+}
+
 // New builds a Server and its routes. It doesn't listen yet; call Serve.
-func New(cfg config.Server, timeouts config.Timeouts, r *router.Router, logger *slog.Logger) *Server {
+func New(cfg config.Server, timeouts config.Timeouts, d Deps) *Server {
 	s := &Server{
 		cfg:      cfg,
 		timeouts: timeouts,
-		log:      logger,
-		router:   r,
+		log:      d.Log,
+		router:   d.Router,
+		keys:     d.Keys,
+		limiter:  d.Limiter,
 		now:      time.Now,
 		started:  time.Now(),
 	}
@@ -48,15 +60,17 @@ func New(cfg config.Server, timeouts config.Timeouts, r *router.Router, logger *
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		// There is deliberately no WriteTimeout: it would cut off long
 		// streams. Streams get per-request deadlines instead.
-		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		ErrorLog: slog.NewLogLogger(d.Log.Handler(), slog.LevelWarn),
 	}
 	return s
 }
 
 // routes builds the handler tree. Middleware runs outside in: shutdown
 // tracking, a request ID, the access log, then panic recovery. API requests
-// then pass the in-flight cap; health checks skip it so they still answer
-// when the gateway is saturated.
+// then pass the in-flight cap, authentication and the requests-per-minute
+// limit, in the order of the request pipeline (brief section 5). Health
+// checks skip all three, so they still answer when the gateway is
+// saturated or the database is down.
 func (s *Server) routes() http.Handler {
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
@@ -65,7 +79,7 @@ func (s *Server) routes() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.Handle("/v1/", limitInflight(s.cfg.MaxInflight, apiMux))
+	mux.Handle("/v1/", limitInflight(s.cfg.MaxInflight, s.authenticate(s.limitRequests(apiMux))))
 
 	return s.trackHandlers(withRequestID(logRequests(s.log, recoverPanics(s.log, mux))))
 }

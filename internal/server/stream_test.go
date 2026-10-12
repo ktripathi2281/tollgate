@@ -162,6 +162,7 @@ func postStream(t *testing.T, client *http.Client, body string) *http.Response {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testSecret)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -463,6 +464,7 @@ func TestClientDisconnectCancelsUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testSecret)
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

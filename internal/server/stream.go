@@ -17,9 +17,10 @@ import (
 )
 
 // streamChat serves a streaming request, following the rules in brief
-// section 8.
+// section 8. It returns how many tokens the request used: the provider's
+// count, an estimate if it sent none, or 0 if no stream started.
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *router.Alias,
-	req provider.ChatRequest, includeUsage bool, received time.Time) {
+	req provider.ChatRequest, includeUsage bool, received time.Time) int {
 	ctx := r.Context()
 
 	stream, result, err := s.router.ChatStream(ctx, alias, req)
@@ -32,7 +33,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		if apiErr := s.upstreamError(ctx, err); apiErr != nil {
 			api.WriteError(w, apiErr)
 		}
-		return
+		return 0
 	}
 	defer stream.Close() // also cancels the upstream call if it is still running
 
@@ -53,7 +54,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		reported *provider.Usage
 		finish   provider.FinishReason
 	)
-	summary := func(outcome string) {
+	// summary logs how the stream ended and returns the tokens it used.
+	summary := func(outcome string) int {
 		u, estimated := usageOrEstimate(reported, req, reply.String())
 		s.log.InfoContext(ctx, "stream ended",
 			slog.String("request_id", RequestID(ctx)),
@@ -64,13 +66,13 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 			slog.Int("completion_tokens", u.CompletionTokens),
 			slog.Bool("usage_estimated", estimated),
 		)
+		return u.PromptTokens + u.CompletionTokens
 	}
 
 	// One loop reads, translates and writes, so a slow client slows the
 	// upstream read down instead of piling chunks up in memory.
 	if out.send(chunks.Role()) != nil {
-		summary("client_gone")
-		return
+		return summary("client_gone")
 	}
 	for {
 		chunk, err := stream.Next()
@@ -83,18 +85,15 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 			// partial reply for a complete one.
 			apiErr := s.upstreamError(ctx, err)
 			if apiErr == nil {
-				summary("client_gone")
-				return
+				return summary("client_gone")
 			}
 			_ = out.send(apiErr.Envelope())
-			summary(apiErr.Code)
-			return
+			return summary(apiErr.Code)
 		}
 		if chunk.Delta != "" {
 			reply.WriteString(chunk.Delta)
 			if out.send(chunks.Content(chunk.Delta)) != nil {
-				summary("client_gone")
-				return
+				return summary("client_gone")
 			}
 		}
 		if chunk.FinishReason != "" {
@@ -112,21 +111,18 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		finish = provider.FinishStop
 	}
 	if out.send(chunks.Finish(finish)) != nil {
-		summary("client_gone")
-		return
+		return summary("client_gone")
 	}
 	if includeUsage {
 		u, _ := usageOrEstimate(reported, req, reply.String())
 		if out.send(chunks.Usage(u)) != nil {
-			summary("client_gone")
-			return
+			return summary("client_gone")
 		}
 	}
 	if out.done() != nil {
-		summary("client_gone")
-		return
+		return summary("client_gone")
 	}
-	summary("completed")
+	return summary("completed")
 }
 
 // eventSender writes events, each with a write deadline. A slow client

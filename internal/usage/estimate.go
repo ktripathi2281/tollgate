@@ -13,8 +13,9 @@ import (
 const charsPerToken = 4
 
 // EstimateTokens estimates the tokens in text at about four characters per
-// token, rounded up. The gateway only estimates when a provider reports no
-// counts, for example after an interrupted stream.
+// token, rounded up. The gateway estimates in two places: to reserve
+// tokens per minute before a request runs, and to count usage when a
+// provider reports none, for example after an interrupted stream.
 func EstimateTokens(text string) int {
 	return tokensForChars(utf8.RuneCountInString(text))
 }

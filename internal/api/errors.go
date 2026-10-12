@@ -7,10 +7,13 @@ import (
 	"time"
 )
 
-// Error types, using OpenAI's names.
+// Error types, using OpenAI's names. A rate-limit error's type names the
+// limit that was hit.
 const (
 	TypeInvalidRequest = "invalid_request_error"
 	TypeServer         = "server_error"
+	TypeRequests       = "requests"
+	TypeTokens         = "tokens"
 )
 
 // Error codes. Where OpenAI has a code for the same case, the gateway uses
@@ -24,6 +27,9 @@ const (
 	CodeUnsupportedParameter = "unsupported_parameter"
 	CodeUnsupportedValue     = "unsupported_value"
 	CodeModelNotFound        = "model_not_found"
+	CodeInvalidAPIKey        = "invalid_api_key"
+	CodeAuthUnavailable      = "auth_unavailable"
+	CodeRateLimitExceeded    = "rate_limit_exceeded"
 	CodeRequestTooLarge      = "request_too_large"
 	CodeOverloaded           = "overloaded"
 	CodeUpstreamError        = "upstream_error"
