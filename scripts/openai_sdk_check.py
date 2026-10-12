@@ -11,9 +11,10 @@ package first (sudo apt install python3-venv):
     python3 -m venv .venv
     .venv/bin/pip install openai
 
-Then start the gateway with `make run` and, in another terminal:
+Then start the gateway with `make run`, create a key with
+`tollgate keys create -name sdk-check`, and in another terminal:
 
-    .venv/bin/python scripts/openai_sdk_check.py
+    TOLLGATE_KEY=<the key> .venv/bin/python scripts/openai_sdk_check.py
 
 Windows Python works too, since WSL forwards localhost:8080 to Windows:
 create the venv with `python -m venv .venv` and run `.venv\\Scripts\\python`.
@@ -30,8 +31,11 @@ import openai
 BASE_URL = os.environ.get("GATEWAY_URL", "http://localhost:8080/v1")
 MESSAGES = [{"role": "user", "content": "Say hello to the gateway."}]
 
-# The gateway has no auth until M4, but the SDK insists on a key.
-client = openai.OpenAI(base_url=BASE_URL, api_key="not-checked-yet", max_retries=0)
+KEY = os.environ.get("TOLLGATE_KEY")
+if not KEY:
+    sys.exit("Set TOLLGATE_KEY to a key from `tollgate keys create`.")
+
+client = openai.OpenAI(base_url=BASE_URL, api_key=KEY, max_retries=0)
 
 ok = True
 
@@ -98,6 +102,14 @@ try:
 except openai.APIError as e:
     print("mid-stream failure after", received, "content chunks:", type(e).__name__, e.code, "-", e.message)
     check("mid-stream failure", received == 4 and e.code == "upstream_error")
+
+# A wrong key is a 401, which the SDK raises as AuthenticationError.
+try:
+    openai.OpenAI(base_url=BASE_URL, api_key="tg_wrong", max_retries=0).models.list()
+    check("wrong key raises", False)
+except openai.AuthenticationError as e:
+    print("wrong key:    ", e.status_code, e.code)
+    check("wrong key code", e.code == "invalid_api_key")
 
 print("OK" if ok else "FAILED")
 sys.exit(0 if ok else 1)
