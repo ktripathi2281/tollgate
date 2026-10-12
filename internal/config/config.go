@@ -34,6 +34,7 @@ type Config struct {
 	Timeouts  Timeouts            `yaml:"timeouts"`
 	Retry     Retry               `yaml:"retry"`
 	Breaker   Breaker             `yaml:"breaker"`
+	Auth      Auth                `yaml:"auth"`
 	Providers map[string]Provider `yaml:"providers"`
 	Models    map[string]Model    `yaml:"models"`
 	// Pricing is keyed by "provider/model"; see PriceKey.
@@ -102,6 +103,13 @@ type Breaker struct {
 	// OpenFor is how long an open breaker skips its target before letting
 	// one probe request through.
 	OpenFor time.Duration `yaml:"open_for"`
+}
+
+// Auth configures API key checks.
+type Auth struct {
+	// CacheTTL is how long a key looked up in the database is remembered.
+	// It is also how long a revoked key keeps working.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
 // Provider configures one upstream provider. Type selects the
@@ -257,6 +265,7 @@ func Default() *Config {
 			FailureThreshold: 5,
 			OpenFor:          30 * time.Second,
 		},
+		Auth: Auth{CacheTTL: 30 * time.Second},
 	}
 }
 
@@ -325,6 +334,7 @@ func (c *Config) validate() error {
 	}
 	c.validateTimeouts(&p)
 	c.validateRetry(&p)
+	c.validateAuth(&p)
 	c.validateProviders(&p)
 	c.validatePricing(&p)
 	c.validateModels(&p)
@@ -402,6 +412,15 @@ func (c *Config) validateRetry(p *problems) {
 	}
 	if b.OpenFor <= 0 {
 		p.addf("breaker.open_for", "must be positive, got %s", b.OpenFor)
+	}
+}
+
+// maxCacheTTL caps auth.cache_ttl, because it is the revocation delay.
+const maxCacheTTL = 5 * time.Minute
+
+func (c *Config) validateAuth(p *problems) {
+	if ttl := c.Auth.CacheTTL; ttl <= 0 || ttl > maxCacheTTL {
+		p.addf("auth.cache_ttl", "must be positive and at most %s (it is how long a revoked key keeps working), got %s", maxCacheTTL, ttl)
 	}
 }
 

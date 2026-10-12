@@ -63,9 +63,16 @@ func TestParseRetryAndBreaker(t *testing.T) {
 retry: { max_attempts_per_target: 3, base_backoff: 100ms, max_backoff: 1s, max_retry_after: 0s }
 breaker: { failure_threshold: 2, open_for: 10s }
 timeouts: { connect: 2s }
+auth: { cache_ttl: 10s }
 `))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Auth.CacheTTL != 10*time.Second {
+		t.Errorf("Auth.CacheTTL = %v, want 10s", cfg.Auth.CacheTTL)
+	}
+	if def := config.Default().Auth.CacheTTL; def != 30*time.Second {
+		t.Errorf("default Auth.CacheTTL = %v, want 30s", def)
 	}
 	if want := (config.Retry{MaxAttemptsPerTarget: 3, BaseBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}); cfg.Retry != want {
 		t.Errorf("Retry = %+v, want %+v", cfg.Retry, want)
@@ -127,6 +134,16 @@ func TestParseRejectsProviderMistakes(t *testing.T) {
 			name:        "connect timeout",
 			yaml:        minimal + "timeouts: { connect: 10m }\n",
 			wantInError: []string{"timeouts.connect: must not be longer than timeouts.total"},
+		},
+		{
+			name:        "zero key cache TTL",
+			yaml:        minimal + "auth: { cache_ttl: 0s }\n",
+			wantInError: []string{"auth.cache_ttl: must be positive and at most 5m0s", "got 0s"},
+		},
+		{
+			name:        "key cache TTL too long to be a revocation delay",
+			yaml:        minimal + "auth: { cache_ttl: 1h }\n",
+			wantInError: []string{"auth.cache_ttl", "got 1h0m0s"},
 		},
 	}
 	for _, tt := range tests {
