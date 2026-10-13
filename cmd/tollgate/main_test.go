@@ -255,10 +255,11 @@ func TestMigrateAndKeysCommands(t *testing.T) {
 
 // child is the gateway running as a separate process.
 type child struct {
-	cmd    *exec.Cmd
-	addr   string
-	logs   *json.Decoder // the rest of its JSON log, from stdout
-	stderr *bytes.Buffer
+	cmd       *exec.Cmd
+	addr      string
+	adminAddr string        // "" if the admin listener is off
+	logs      *json.Decoder // the rest of its JSON log, from stdout
+	stderr    *bytes.Buffer
 }
 
 // startServe runs "tollgate serve" in a child process with the given config
@@ -281,7 +282,10 @@ func startServe(t *testing.T, ctx context.Context, yaml, dbURL string) *child {
 		if err := c.logs.Decode(&rec); err != nil {
 			t.Fatalf("reading child logs: %v\nstderr:\n%s", err, c.stderr)
 		}
-		if rec.Msg == "listening" {
+		switch rec.Msg {
+		case "admin listening": // logged before "listening"
+			c.adminAddr = rec.Addr
+		case "listening":
 			c.addr = rec.Addr
 		}
 	}
@@ -322,7 +326,7 @@ func TestServeExitsCleanlyOnSIGTERM(t *testing.T) {
 
 	dbURL := storetest.URL(t)
 	secret := createKey(t, dbURL)
-	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n", dbURL)
+	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  admin_addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n", dbURL)
 	checkHealthz(t, c.addr)
 
 	// Acceptance (M4), end to end: 401 without a valid key.
@@ -359,7 +363,7 @@ func TestServeDrainsStreamOnSIGTERM(t *testing.T) {
 
 	// 10 words, 100ms apart: the stream is still running when SIGTERM lands.
 	yaml := strings.Replace(mockConfig, "output_tokens: 5", "output_tokens: 10\n    token_interval: 100ms", 1) +
-		"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 10s\n"
+		"server:\n  addr: \"127.0.0.1:0\"\n  admin_addr: \"127.0.0.1:0\"\n  shutdown_grace: 10s\n"
 	dbURL := storetest.URL(t)
 	secret := createKey(t, dbURL)
 	c := startServe(t, ctx, yaml, dbURL)

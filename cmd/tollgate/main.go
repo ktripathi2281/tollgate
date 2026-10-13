@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-const usage = `Usage: tollgate <command> [flags]
+const usageText = `Usage: tollgate <command> [flags]
 
 Commands:
   serve      run the gateway
@@ -46,7 +46,7 @@ var errUsage = errors.New("no command given")
 // tests can call it directly.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		fmt.Fprint(stderr, usageText)
 		return errUsage
 	}
 
@@ -61,9 +61,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "reconcile":
 		err = reconcile(ctx, rest, stdout, stderr)
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		fmt.Fprint(stdout, usageText)
 	default:
-		fmt.Fprint(stderr, usage)
+		fmt.Fprint(stderr, usageText)
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
 

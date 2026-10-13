@@ -95,7 +95,7 @@ func TestServeSpendsABudget(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n", dbURL)
+	c := startServe(t, ctx, mockConfig+"server:\n  addr: \"127.0.0.1:0\"\n  admin_addr: \"127.0.0.1:0\"\n  shutdown_grace: 5s\n", dbURL)
 
 	client := &http.Client{Transport: &http.Transport{}}
 	defer client.CloseIdleConnections()
