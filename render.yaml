@@ -1,0 +1,28 @@
+# Render Blueprint for the hosted demo: one free web service built from the
+# Dockerfile. docs/DEPLOY.md has the steps, including the database
+# (Supabase) and the migrations, which run from your machine because free
+# services have no pre-deploy command.
+services:
+  - type: web
+    name: tollgate
+    runtime: docker
+    plan: free
+    # Put this in the same region as the Supabase project.
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerCommand: tollgate serve --config /etc/tollgate/demo.yaml
+    # Liveness only: /readyz would fail whenever the database is paused,
+    # and Render would restart a gateway that can't fix that.
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: PORT
+        value: "8080"
+      # Supabase's session pooler URL; Render asks for it when the
+      # Blueprint is created. Never commit it.
+      - key: DATABASE_URL
+        sync: false
+      # Optional: enables the `fast` alias. Leave it empty for a demo that
+      # only serves the mock aliases.
+      - key: ANTHROPIC_API_KEY
+        sync: false

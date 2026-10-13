@@ -12,7 +12,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/tollgate ./
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/tollgate /out/mockupstream /usr/local/bin/
-COPY deploy/config.yaml /etc/tollgate/config.yaml
+# config.yaml is for docker compose; demo.yaml for the hosted demo.
+COPY deploy/config.yaml deploy/demo.yaml /etc/tollgate/
 # 8080 is the API; 6060 the admin listener (metrics and pprof), which
 # docker-compose.yml keeps on the internal network.
 EXPOSE 8080 6060

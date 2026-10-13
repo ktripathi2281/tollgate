@@ -1,0 +1,63 @@
+# Config for the hosted demo on Render (render.yaml, docs/DEPLOY.md).
+# Render routes public traffic to $PORT, which render.yaml sets to 8080.
+# Secrets come from Render's environment settings: DATABASE_URL (Supabase)
+# and, optionally, ANTHROPIC_API_KEY.
+
+server:
+  addr: ":8080"
+  # Metrics and pprof stay inside the container: a free Render service
+  # receives no private-network traffic, so nothing outside can reach them.
+  admin_addr: "127.0.0.1:6060"
+  # Render sends SIGKILL 30s after SIGTERM, so in-flight requests get 20s,
+  # leaving time to settle holds and write the request log.
+  shutdown_grace: 20s
+  # A free instance has 0.1 CPU and 512 MB; shed load well before that.
+  max_inflight: 200
+
+timeouts:
+  first_token: 30s
+  idle: 30s
+  total: 300s
+
+providers:
+  # Disabled, with a warning, unless ANTHROPIC_API_KEY is set on Render.
+  anthropic:
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+  mock:
+    type: mock
+    ttft: 100ms
+    token_interval: 10ms
+    output_tokens: 50
+  mock-flaky:
+    type: mock
+    ttft: 100ms
+    token_interval: 10ms
+    output_tokens: 50
+    fail_at_chunk: 5
+
+models:
+  fast:
+    default_max_tokens: 1024
+    max_tokens_ceiling: 4096
+    targets:
+      - { provider: anthropic, model: claude-haiku-5-5, sampling: false }
+  mock-fast:
+    default_max_tokens: 256
+    max_tokens_ceiling: 1024
+    targets:
+      - { provider: mock, model: mock-1 }
+  mock-flaky:
+    default_max_tokens: 256
+    max_tokens_ceiling: 1024
+    targets:
+      - { provider: mock-flaky, model: mock-1 }
+
+pricing:
+  anthropic/claude-haiku-5-5:
+    input: "0.10"
+    output: "0.50"
+    long_context: { above_prompt_tokens: 100000, input: "0.50", output: "2.50" }
+  mock/mock-1: { input: "1.00", output: "2.00" }
+  mock-flaky/mock-1: { input: "1.00", output: "2.00" }
