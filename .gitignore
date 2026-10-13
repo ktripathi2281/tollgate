@@ -7,6 +7,9 @@
 # Secrets
 .env
 
+# Raw benchmark results from make bench; docs/BENCHMARKS.md has the tables
+/bench-results/
+
 # Test and profiling artefacts
 *.test
 *.out

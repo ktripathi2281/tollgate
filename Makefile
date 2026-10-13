@@ -37,8 +37,8 @@ db: ## Start the local Postgres in Docker and wait until it is ready
 migrate: build ## Apply database migrations to $DATABASE_URL (from .env)
 	@$(LOAD_ENV); ./$(BIN_DIR)/$(BINARY) migrate
 
-bench: ## Run the benchmarks (arrives in M7)
-	@echo "make bench: arrives in M7"; exit 1
+bench: ## Run the benchmarks in docs/BENCHMARKS.md (needs Postgres: make db); BENCH_DURATION=20s by default
+	@$(LOAD_ENV); bash scripts/bench.sh
 
 smoke: ## Call the real provider APIs with the keys and models in .env
 	@$(LOAD_ENV); go test -tags smoke -count=1 -v -run '^TestSmoke' ./internal/provider/openai/ ./internal/provider/anthropic/

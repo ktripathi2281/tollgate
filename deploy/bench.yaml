@@ -1,0 +1,33 @@
+# Config for `make bench` (scripts/bench.sh). One alias, "bench", whose
+# only target is the standalone mock upstream over HTTP, as an
+# OpenAI-compatible provider, so a request takes the same path through the
+# gateway as one to a real provider. The ports avoid the compose stack's.
+
+server:
+  addr: "127.0.0.1:8181"
+  admin_addr: "127.0.0.1:6161"
+  max_inflight: 5000
+  shutdown_grace: 10s
+
+timeouts:
+  first_token: 30s
+  idle: 30s
+  total: 300s
+
+providers:
+  upstream:
+    type: openai
+    base_url: http://127.0.0.1:9191/v1
+    # The mock ignores the key, but the provider needs one to be enabled;
+    # the script sets this variable.
+    api_key_env: BENCH_UPSTREAM_KEY
+
+models:
+  bench:
+    default_max_tokens: 64
+    max_tokens_ceiling: 256
+    targets:
+      - { provider: upstream, model: mock-1 }
+
+pricing:
+  upstream/mock-1: { input: "1.00", output: "2.00" }
