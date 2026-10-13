@@ -451,3 +451,50 @@ A response over `max_response_bytes` completes the record without a body. A retr
 | Idempotency check failed | 503 | `server_error` | `idempotency_unavailable` |
 
 The 402 message names the budget, the request's worst case and when the period resets.
+
+## 50. The request log (M6)
+
+**Decision.** Every `POST /v1/chat/completions` gets one row, including those refused by middleware (401, 429, 503), so a key's failures are visible too; other routes get none. The access-log middleware gives each chat request a `requestInfo` in its context. The middleware and handlers inside fill it in (key, alias, provider, attempts, usage, cost, time to first token, error code, replay flag), and the access log records it when the response is done. Because the access log sits outside panic recovery, a panic is logged with the 500 it really sent.
+
+`Record` is a non-blocking send to a buffered channel: when the channel is full, the row is dropped and counted. One worker collects rows into batches. It writes a batch when it reaches `batch_size`, and every `flush_every` it writes whatever smaller batch is waiting. The write is one `COPY`, with a 10s timeout of its own; a failed write is logged, and its rows are counted as lost. Defaults: a 10,000-row buffer, batches of 500, and a one-second interval.
+
+The table has no foreign key to `api_keys`, which keeps the COPY cheap, and NULL where a field doesn't apply. The brief's "error class" is stored as `error_code`, the code the client was sent. Latency and time to first token are in microseconds; time to first token is set only for streams that sent content. Rows have no retention limit yet, which is a listed limitation.
+
+**Rejected.** A row written by the handler itself: it wouldn't see the status sent by panic recovery or middleware. A synchronous insert: one per request, and a slow database would slow every request.
+
+## 51. Metrics (M6)
+
+**Decision.** Prometheus metrics in their own registry, with the Go runtime and process collectors, served at `/metrics` on the admin listener.
+- **Requests:** request count and duration share one histogram, `tollgate_http_request_duration_seconds{route,status}`, whose `_count` series is the count. Unknown paths share the route labels `/v1/other` and `other`, so probing can't create new series.
+- **Upstream:** calls by provider and outcome; retries (a try on the same target as the previous one); fallbacks (a move to a different target); breaker state as an enum gauge, `{alias,target,state}` = 1 for the current state, read from the router at scrape time.
+- **Usage:** tokens and cost by provider. Cost is a float in USD here, because metrics are not the money path; the exact amounts are in the budget tables.
+- **Timing:** gateway overhead is total time minus the time inside upstream calls, for non-streaming requests only; a stream's upstream time is most of its life, so overhead would mean nothing there. Time to first token is measured for streams.
+- **Read at scrape time:** counts kept as atomics elsewhere (dropped, written and failed request-log rows, settle failures, late settles, swept holds) and the in-flight gauge. The hot path never touches a metric for these.
+
+No label holds a key, a request ID or anything else unbounded.
+
+**Rejected.** A separate request counter beside the histogram: it would duplicate `_count`. Overhead for streams: a meaningless number.
+
+## 52. The admin listener and `/readyz` (M6)
+
+**Decision.** `server.admin_addr` (default `127.0.0.1:6060`, empty to turn it off) serves `/metrics` and `/debug/pprof/` from a separate `http.Server`. Neither belongs on the public port: pprof exposes internals and can be made to burn CPU. Startup rejects an admin address equal to the public one, unless both use port 0. The admin listener stops after the public server has finished; a profile in progress gets 5 seconds. In compose it binds `:6060` inside the container and isn't published, so only Prometheus, on the compose network, reaches it.
+
+`/readyz` on the public listener returns 503 once shutdown has begun, or when the database doesn't answer a ping within 2 seconds. `/healthz` stays a liveness check that never touches the database, so a database outage marks the gateway not ready, rather than having it restarted.
+
+## 53. Background work stops after the requests (M6)
+
+**Decision.** `serve` runs its background goroutines (the sweeper, the request-log worker and the admin listener) on one context that it cancels only after `Serve` has returned, which happens once every request has finished or been cancelled. The log worker then writes what is still queued, and `serve` waits for all of them before the deferred `db.Close`. Stopping on the signal instead would end the worker while requests were still being drained, and lose their rows.
+
+## 54. Docker and compose arrive in M6 (M6)
+
+**Context.** The brief puts the Dockerfile and the full compose file in M7, but M6's manual check is Prometheus scraping the gateway through compose.
+
+**Decision.** The Dockerfile moves to M6: a multi-stage build of static binaries (`CGO_ENABLED=0`) into `distroless/static-debian12:nonroot`, which has CA certificates for HTTPS to providers and runs as non-root. Compose runs:
+- Postgres;
+- a one-shot `migrate` service;
+- the gateway, which starts once `migrate` has exited successfully, takes provider keys from `.env` if there is one, and is published on `127.0.0.1:8080`;
+- Prometheus v3.14.0 on `127.0.0.1:9090`, scraping `gateway:6060` every 5 seconds.
+
+The mock upstream joins in M7, with the benchmarks that need it.
+
+**Rejected.** Running the gateway on the host and Prometheus in compose: reaching a WSL process from a container depends on Docker Desktop's networking, and the same setup wouldn't work on Linux.
