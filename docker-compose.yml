@@ -30,7 +30,7 @@ services:
   # Applies the migrations, then exits. The gateway starts after it.
   migrate:
     build: .
-    command: ["migrate"]
+    command: ["tollgate", "migrate"]
     environment:
       DATABASE_URL: *database-url
     depends_on:
@@ -41,8 +41,7 @@ services:
   # mock-http alias: the same path a request to a real provider takes.
   mockupstream:
     build: .
-    entrypoint: ["mockupstream"]
-    command: ["-addr", ":9090"]
+    command: ["mockupstream", "-addr", ":9090"]
 
   gateway:
     build: .

@@ -21,5 +21,7 @@ WORKDIR /etc/tollgate
 # 8080 is the API; 6060 the admin listener (metrics and pprof), which
 # docker-compose.yml keeps on the internal network.
 EXPOSE 8080 6060
-ENTRYPOINT ["tollgate"]
-CMD ["serve"]
+# No ENTRYPOINT: a command given to the container is the whole command, so
+# `tollgate keys ...`, `mockupstream ...`, and a host's start-command
+# override such as Render's all work the same way.
+CMD ["tollgate", "serve"]
