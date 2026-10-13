@@ -370,7 +370,7 @@ At both caps, a part is 1e18 and the sum stays under `int64`'s 9.2e18. A request
 2. `UPDATE budget_periods SET held = held + amount WHERE spent + held + amount <= budget`;
 3. insert the hold, unless step 2 changed no row, in which case the request gets a 402.
 
-The UPDATE locks the period's row, so concurrent holds for one key take turns, and each re-checks the condition against the previous one's result. Invariant 3 holds without `SERIALIZABLE`.
+The UPDATE locks the period's row, so concurrent holds for one key take turns, and each re-checks the condition against the previous one's result. Invariant 3 holds without `SERIALIZABLE`. (M7 made steps 2 and 3 a single statement, and settle and release likewise: see entry 59.)
 
 The hold amount is the largest `Cost(InputBound(messages), maxTokens)` over the alias's targets. Settle and release are guarded by `WHERE status = 'held'`, and the database rejects a row whose status disagrees with its cost or resolution time. Every timestamp comes from the gateway's clock, not `now()` in SQL, so tests can cross a period boundary or expire a hold without waiting. A hold settles into the period it was placed in.
 
@@ -498,3 +498,54 @@ No label holds a key, a request ID or anything else unbounded.
 The mock upstream joins in M7, with the benchmarks that need it.
 
 **Rejected.** Running the gateway on the host and Prometheus in compose: reaching a WSL process from a container depends on Docker Desktop's networking, and the same setup wouldn't work on Linux.
+
+## 55. The load generator (M7)
+
+**Decision.** `cmd/loadgen` runs N workers, each sending its next request as soon as the last one finishes: a closed loop that measures what the gateway sustains. With `-rate`, a pacer hands out one ticket per request instead, capping the rate across all workers. Latency runs from the send to the end of the response; time to first token runs to the first event with non-empty content, so the role-only event before it doesn't count. Percentiles use the nearest-rank method over every sample, kept in memory. A stream that ends without `[DONE]` counts as an error, and so does one with an error event.
+
+**Rejected.** Correcting for coordinated omission, as wrk2 does: it matters for open-loop tests at a fixed rate, and these runs are closed-loop by design. The docs say so. A third-party tool such as k6 or vegeta: another dependency, and none of them knows that a stream's first token is the first event with content.
+
+## 56. How the benchmarks are run (M7)
+
+**Decision.**
+- **The upstream:** the mock runs as a separate process, behind an OpenAI-type provider, so a request takes the full path a real provider call takes: HTTP, SSE parsing, usage.
+- **Its latency:** fixed at 50 ms to the first token, then 5 ms per token for 20 tokens. Without fixed latency, the gateway's overhead would be indistinguishable from the mock's.
+- **The keys:** each run uses either a key without a budget or one with an unreachable budget, so the difference is what the two transactions per request cost.
+- **The comparison:** overhead is the gateway's latency minus the baseline straight to the mock, at each percentile. One zero-latency run at 200 workers finds the throughput ceiling, and a CPU profile is taken during it.
+- **Correctness:** `tollgate reconcile` runs after the budgeted runs, and must pass.
+
+All of it runs on one machine, which the results say plainly.
+
+## 57. The hosted demo: Render and Supabase free tiers (M7)
+
+**Context.** The demo has to cost nothing. Render's free web service is the only no-card free host that runs our Docker image. Fly.io has no free tier for new accounts, and Cloud Run would need an always-on instance, which the free tier doesn't cover.
+
+**Decision.**
+- **Render:** a Blueprint (`render.yaml`) for one free Docker web service running `tollgate serve --config /etc/tollgate/demo.yaml`. `PORT=8080` points Render at the gateway's port. The health check is `/healthz`, not `/readyz`, so a paused database doesn't make Render restart the gateway. The demo config's 20s shutdown grace fits inside Render's 30s before SIGKILL, and the admin listener stays on localhost inside the container.
+- **The database:** Supabase's session pooler, on port 5432 over IPv4, because pgx's prepared statements and goose's advisory locks need session mode; the transaction pooler (6543) supports neither.
+- **Migrations and keys:** free Render services have no pre-deploy command and no shell, so both run from a developer's machine against the same `DATABASE_URL`.
+- **The public demo key:** limited to the mock aliases, with low limits and a small daily budget.
+
+The trade-offs, written in `docs/DEPLOY.md`: about a minute's cold start after 15 idle minutes, and a Supabase pause after 7 idle days.
+
+**Rejected.** Fly.io: about $2 a month, with no cold starts, but not free. Cloud Run: background goroutines need instance-based billing, which charges for an always-on instance beyond the free tier.
+
+## 58. The mock upstream in compose (M7)
+
+**Decision.** Compose runs `mockupstream` from the same image, on the compose network only, and the gateway's `mock-http` alias reaches it as an OpenAI-compatible provider. `mock-fast` keeps the in-process mock, which needs nothing else running. `mock-http` exercises the HTTP adapter, SSE parsing and connection reuse that real providers use, without a provider key.
+
+## 59. Holds and settles are single statements (M7)
+
+**Context.** The first benchmark capped a budgeted key at 215 requests a second, whatever the concurrency. Every hold and settle for a key updates the same `budget_periods` row. Each was a transaction of several statements, so the row stayed locked across network round trips between them, and the key's requests took turns for it.
+
+**Decision.** A hold is now two statements:
+1. ensure the period's row exists, which takes no lock if it does;
+2. a data-modifying CTE that runs the conditional UPDATE of the period and INSERTs the hold from the row it returns.
+
+Settle and release are one CTE each: UPDATE the hold if it is still held, then UPDATE its period from the row that returns. A statement that matches nothing means the hold doesn't fit, or was already resolved, as before. Each statement commits as soon as it finishes, so the row is locked only while Postgres runs it. The guarantees are the same: the conditional UPDATE re-checks the budget after waiting for the lock, the status guard makes settle and release idempotent, and every money test passes unchanged.
+
+At 50 workers, the cap rose from 215 to 300 requests a second, and the overhead at the median fell from 73 ms to 8 ms.
+
+**What still limits it.** Postgres releases a row lock only once the commit's write-ahead log is flushed, and a budgeted request commits on its key's row twice. On the benchmark machine a flush takes 1.28 ms, which comes to about 300 requests a second per key. A diagnostic run with `synchronous_commit = off` reached 1,255 a second, but that setting isn't used: a database crash could lose settles the gateway had already counted, and with them recorded spend. The cap is per key, documented in the README and `docs/BENCHMARKS.md`.
+
+**Rejected.** `synchronous_commit = off`, for the reason above. Splitting a key's counters across several rows: it raises the cap, but the budget check then has to sum the rows, and that loses the single conditional UPDATE that makes oversubscription impossible.

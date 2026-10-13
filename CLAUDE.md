@@ -20,7 +20,7 @@ The spec is `docs/BRIEF.md`. It is long: before writing code, read the sections 
 - `make db`: start the local Postgres (docker compose); `make migrate`: apply migrations
 - `make run`: build, then serve with `config.yaml` (needs `DATABASE_URL` and a key from `tollgate keys create`)
 - `docker compose up -d --build`: Postgres, migrations, the gateway on :8080 and Prometheus on :9090
-- `make smoke`: real provider calls; `make bench`: added in M7
+- `make smoke`: real provider calls; `make bench`: the benchmarks in `docs/BENCHMARKS.md` (needs `make db`)
 
 ## Rules
 
