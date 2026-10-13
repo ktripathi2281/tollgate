@@ -5,12 +5,14 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
 	"github.com/ktripathi2281/tollgate/internal/auth"
 	"github.com/ktripathi2281/tollgate/internal/store"
 	"github.com/ktripathi2281/tollgate/internal/store/storetest"
+	"github.com/ktripathi2281/tollgate/internal/usage"
 )
 
 // These tests need Postgres: see storetest.EnvURL.
@@ -155,5 +157,38 @@ func TestCreateKeyRejectsBadRows(t *testing.T) {
 				t.Error("want an error")
 			}
 		})
+	}
+}
+
+func TestWriteRequestLogs(t *testing.T) {
+	s, dbURL := storetest.OpenWithURL(t)
+	at := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	entries := []usage.Entry{
+		{
+			Time: at, RequestID: "req_ok", KeyID: 7, Alias: "fast", Provider: "anthropic", Model: "claude-haiku-5-5",
+			Stream: true, Status: 200, Attempts: 2, PromptTokens: 10, CompletionTokens: 20,
+			Cost: 123, Latency: 1500 * time.Millisecond, TTFT: 250 * time.Millisecond,
+		},
+		// A request refused before it was read: most columns are empty.
+		{Time: at, RequestID: "req_401", Status: 401, ErrorCode: "invalid_api_key", Latency: time.Millisecond},
+	}
+	if err := s.WriteRequestLogs(t.Context(), entries); err != nil {
+		t.Fatalf("WriteRequestLogs: %v", err)
+	}
+	if n := storetest.Int(t, dbURL, "SELECT count(*) FROM request_logs"); n != 2 {
+		t.Fatalf("%d rows, want 2", n)
+	}
+	if n := storetest.Int(t, dbURL, `SELECT count(*) FROM request_logs WHERE request_id = 'req_ok'
+		AND key_id = 7 AND alias = 'fast' AND provider = 'anthropic' AND stream AND status = 200 AND attempts = 2
+		AND prompt_tokens = 10 AND completion_tokens = 20 AND cost_micros = 123
+		AND latency_us = 1500000 AND ttft_us = 250000 AND error_code IS NULL AND NOT replayed`); n != 1 {
+		t.Error("the successful row's columns don't match")
+	}
+	if n := storetest.Int(t, dbURL, `SELECT count(*) FROM request_logs WHERE request_id = 'req_401'
+		AND key_id IS NULL AND alias IS NULL AND provider IS NULL AND ttft_us IS NULL AND error_code = 'invalid_api_key'`); n != 1 {
+		t.Error("empty fields should be NULL")
+	}
+	if err := s.Ping(t.Context()); err != nil {
+		t.Errorf("Ping: %v", err)
 	}
 }

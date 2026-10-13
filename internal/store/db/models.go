@@ -54,3 +54,24 @@ type IdempotencyRecord struct {
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
 }
+
+type RequestLog struct {
+	ID               int64
+	CreatedAt        time.Time
+	RequestID        string
+	KeyID            *int64
+	Alias            *string
+	Provider         *string
+	Model            *string
+	Stream           bool
+	Status           int32
+	ErrorCode        *string
+	Attempts         int32
+	PromptTokens     int32
+	CompletionTokens int32
+	UsageEstimated   bool
+	CostMicros       int64
+	LatencyUs        int64
+	TtftUs           *int64
+	Replayed         bool
+}
