@@ -4,9 +4,8 @@
 #   docker compose exec gateway tollgate keys create -name demo
 #
 # The API is on localhost:8080 and Prometheus on localhost:9090. The
-# gateway's admin listener (metrics, pprof) stays on the compose network.
-# The database password is for this local setup only. The mock upstream
-# joins in M7, for the benchmarks.
+# gateway's admin listener (metrics, pprof) and the mock upstream stay on
+# the compose network. The database password is for this local setup only.
 
 x-database-url: &database-url postgres://tollgate:tollgate@postgres:5432/tollgate?sslmode=disable
 
@@ -38,10 +37,19 @@ services:
       postgres:
         condition: service_healthy
 
+  # A mock OpenAI-compatible provider over HTTP, behind the gateway's
+  # mock-http alias: the same path a request to a real provider takes.
+  mockupstream:
+    build: .
+    entrypoint: ["mockupstream"]
+    command: ["-addr", ":9090"]
+
   gateway:
     build: .
     environment:
       DATABASE_URL: *database-url
+      # The mock ignores it, but an OpenAI-type provider needs a key.
+      MOCK_UPSTREAM_KEY: unused
     # Provider keys, if .env has them; the mock aliases work without.
     env_file:
       - path: .env
@@ -51,6 +59,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      mockupstream:
+        condition: service_started
 
   prometheus:
     image: prom/prometheus:v3.14.0
