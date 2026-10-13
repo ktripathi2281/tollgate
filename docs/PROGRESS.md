@@ -23,7 +23,8 @@
 | Baseline and through-gateway runs, streaming and not, with and without a budget, at 50, 200 and 1,000 workers; a zero-latency ceiling with a CPU profile and one fix, before and after | done, 2026-10-13: `docs/BENCHMARKS.md` |
 | `tollgate reconcile` passes after the budgeted runs | pass: 0 mismatched, in every run |
 | `make bench` reproduces `docs/BENCHMARKS.md` | yes, once the exercise is in |
-| The README quickstart works from a clean clone | checked 2026-10-13: see below |
+| The README quickstart works from a clean clone | pass, 2026-10-13: a fresh clone without `.env` came up with `docker compose up -d --build`; every README command worked once the image's working directory was fixed |
+| No secrets in the repository | pass: no keys tracked; the only password is the local Postgres container's |
 | `docker compose up` brings everything up, and the mock alias works without provider keys | pass |
 | Hosted demo | ready to deploy: `docs/DEPLOY.md` (Render free plus Supabase free); the deploy itself needs the maintainer's accounts |
 
