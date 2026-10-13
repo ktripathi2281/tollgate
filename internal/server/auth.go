@@ -11,6 +11,7 @@ import (
 	"github.com/ktripathi2281/tollgate/internal/api"
 	"github.com/ktripathi2281/tollgate/internal/auth"
 	"github.com/ktripathi2281/tollgate/internal/limiter"
+	"github.com/ktripathi2281/tollgate/internal/metrics"
 )
 
 // Authenticator resolves the API key a request presents. auth.Cache is the
@@ -44,28 +45,29 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented, ok := bearerToken(r)
 		if !ok {
-			unauthorized(w, "No API key provided. Send it in an Authorization header using Bearer auth: `Authorization: Bearer YOUR_KEY`.")
+			unauthorized(w, r, "No API key provided. Send it in an Authorization header using Bearer auth: `Authorization: Bearer YOUR_KEY`.")
 			return
 		}
 		key, err := s.keys.Authenticate(r.Context(), presented)
 		switch {
 		case errors.Is(err, auth.ErrUnknownKey):
-			unauthorized(w, "Incorrect API key provided.")
+			unauthorized(w, r, "Incorrect API key provided.")
 			return
 		case errors.Is(err, auth.ErrRevokedKey):
-			unauthorized(w, "The API key has been revoked.")
+			unauthorized(w, r, "The API key has been revoked.")
 			return
 		case err != nil:
 			if r.Context().Err() != nil {
 				return // the client went away during the lookup
 			}
 			s.log.ErrorContext(r.Context(), "key lookup failed", "request_id", RequestID(r.Context()), "error", err)
-			api.WriteError(w, &api.Error{
+			writeError(w, r, &api.Error{
 				Status: http.StatusServiceUnavailable, Type: api.TypeServer, Code: api.CodeAuthUnavailable,
 				Message: "The gateway can't check API keys right now. Retry shortly.", RetryAfter: time.Second,
 			})
 			return
 		}
+		infoFrom(r.Context()).KeyID = key.ID
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiKeyKey, key)))
 	})
 }
@@ -81,9 +83,9 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, token != ""
 }
 
-func unauthorized(w http.ResponseWriter, msg string) {
+func unauthorized(w http.ResponseWriter, r *http.Request, msg string) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
-	api.WriteError(w, &api.Error{
+	writeError(w, r, &api.Error{
 		Status: http.StatusUnauthorized, Type: api.TypeInvalidRequest, Code: api.CodeInvalidAPIKey, Message: msg,
 	})
 }
@@ -94,7 +96,8 @@ func (s *Server) limitRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := keyFrom(r.Context())
 		if wait, ok := s.limiter.AllowRequest(key.ID, limitsOf(key)); !ok {
-			api.WriteError(w, &api.Error{
+			s.metrics.Rejected(metrics.RequestsPerMinute)
+			writeError(w, r, &api.Error{
 				Status: http.StatusTooManyRequests, Type: api.TypeRequests, Code: api.CodeRateLimitExceeded,
 				Message: fmt.Sprintf("Rate limit reached for requests per minute (RPM): limit %d. "+
 					"Retry after the time in the Retry-After header.", key.RPM),
@@ -112,6 +115,7 @@ func (s *Server) limitRequests(next http.Handler) http.Handler {
 // Retry-After.
 func (s *Server) reserveTokens(key auth.Key, n int) *api.Error {
 	if n > key.TPM {
+		s.metrics.Rejected(metrics.TokensPerMinute)
 		return &api.Error{
 			Status: http.StatusTooManyRequests, Type: api.TypeTokens, Code: api.CodeRateLimitExceeded,
 			Message: fmt.Sprintf("Request too large for tokens per minute (TPM): limit %d, requested %d "+
@@ -119,6 +123,7 @@ func (s *Server) reserveTokens(key auth.Key, n int) *api.Error {
 		}
 	}
 	if wait, ok := s.limiter.ReserveTokens(key.ID, limitsOf(key), n); !ok {
+		s.metrics.Rejected(metrics.TokensPerMinute)
 		return &api.Error{
 			Status: http.StatusTooManyRequests, Type: api.TypeTokens, Code: api.CodeRateLimitExceeded,
 			Message: fmt.Sprintf("Rate limit reached for tokens per minute (TPM): limit %d, requested %d. "+

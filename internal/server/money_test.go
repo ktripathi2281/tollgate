@@ -353,9 +353,17 @@ func TestIdempotentReplay(t *testing.T) {
 	p, calls := countingMock(mock.Config{OutputTokens: 4})
 	s := testServer(t, p, nil)
 	f := withMoney(t, s, "mock", 1_000_000)
+	rows := &collectingLog{}
+	s.requests = rows
 
 	first := doIdem(t.Context(), s, `"order-1"`, chatBody)
 	second := doIdem(t.Context(), s, `"order-1"`, chatBody)
+	if e := rows.last(t); !e.Replayed || e.Status != http.StatusOK || e.Provider != "" {
+		t.Errorf("the replay's request-log row = %+v, want replayed with no provider", e)
+	}
+	if !strings.Contains(scrape(t, s), "tollgate_idempotent_replays_total 1") {
+		t.Error("the replay wasn't counted")
+	}
 	if first.Code != http.StatusOK || second.Code != http.StatusOK {
 		t.Fatalf("statuses %d and %d, want 200 and 200", first.Code, second.Code)
 	}

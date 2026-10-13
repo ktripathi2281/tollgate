@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/config"
+	"github.com/ktripathi2281/tollgate/internal/metrics"
 	"github.com/ktripathi2281/tollgate/internal/router"
 )
 
@@ -32,10 +34,16 @@ type Server struct {
 	budgets  Budgets
 	idem     Idempotency
 	pricing  map[string]config.Price // by config.PriceKey
-	now      func() time.Time        // the clock for response timestamps; tests replace it
+	metrics  *metrics.Metrics
+	requests RequestLog
+	db       Pinger
+	inflight chan struct{}    // the in-flight cap's slots
+	now      func() time.Time // the clock for response timestamps; tests replace it
 	started  time.Time
 	http     *http.Server
 	handlers sync.WaitGroup // requests being handled, so shutdown can wait for them
+	// stopping is set when shutdown begins, so /readyz says not ready.
+	stopping atomic.Bool
 }
 
 // Deps are the parts the server is built from, besides its config.
@@ -47,7 +55,18 @@ type Deps struct {
 	Idempotency Idempotency
 	// Pricing has a price for every target, by config.PriceKey.
 	Pricing map[string]config.Price
-	Log     *slog.Logger
+	// Metrics, if nil, are kept in a registry that nothing serves.
+	Metrics *metrics.Metrics
+	// RequestLog, if nil, drops every row.
+	RequestLog RequestLog
+	// DB is pinged by /readyz. If nil, only shutdown makes /readyz fail.
+	DB  Pinger
+	Log *slog.Logger
+}
+
+// Pinger checks that the database answers. store.Store implements it.
+type Pinger interface {
+	Ping(ctx context.Context) error
 }
 
 // New builds a Server and its routes. It doesn't listen yet; call Serve.
@@ -62,9 +81,20 @@ func New(cfg config.Server, timeouts config.Timeouts, d Deps) *Server {
 		budgets:  d.Budgets,
 		idem:     d.Idempotency,
 		pricing:  d.Pricing,
+		metrics:  d.Metrics,
+		requests: d.RequestLog,
+		db:       d.DB,
+		inflight: make(chan struct{}, cfg.MaxInflight),
 		now:      time.Now,
 		started:  time.Now(),
 	}
+	if s.metrics == nil {
+		s.metrics = metrics.New()
+	}
+	if s.requests == nil {
+		s.requests = noRequestLog{}
+	}
+	s.registerMetrics()
 	s.http = &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
@@ -89,9 +119,10 @@ func (s *Server) routes() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.Handle("/v1/", limitInflight(s.cfg.MaxInflight, s.authenticate(s.limitRequests(apiMux))))
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.Handle("/v1/", s.limitInflight(s.authenticate(s.limitRequests(apiMux))))
 
-	return s.trackHandlers(withRequestID(logRequests(s.log, recoverPanics(s.log, mux))))
+	return s.trackHandlers(withRequestID(s.logRequests(recoverPanics(s.log, mux))))
 }
 
 // trackHandlers counts running handlers, so shutdown can wait for them.
@@ -136,6 +167,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	case <-ctx.Done():
 	}
 
+	s.stopping.Store(true)
 	s.log.Info("shutting down", "grace", s.cfg.ShutdownGrace.String())
 
 	// ctx is already cancelled, so the grace period needs a fresh context.

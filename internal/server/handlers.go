@@ -16,6 +16,7 @@ import (
 	"github.com/ktripathi2281/tollgate/internal/api"
 	"github.com/ktripathi2281/tollgate/internal/budget"
 	"github.com/ktripathi2281/tollgate/internal/idempotency"
+	"github.com/ktripathi2281/tollgate/internal/metrics"
 	"github.com/ktripathi2281/tollgate/internal/provider"
 	"github.com/ktripathi2281/tollgate/internal/router"
 	"github.com/ktripathi2281/tollgate/internal/usage"
@@ -40,7 +41,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes))
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			api.WriteError(w, &api.Error{
+			writeError(w, r, &api.Error{
 				Status: http.StatusRequestEntityTooLarge, Type: api.TypeInvalidRequest, Code: api.CodeRequestTooLarge,
 				Message: fmt.Sprintf("The request body is larger than %d bytes.", s.cfg.MaxBodyBytes),
 			})
@@ -53,15 +54,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := api.ParseChatCompletionRequest(body)
 	if err != nil {
-		api.WriteError(w, toAPIError(err))
+		writeError(w, r, toAPIError(err))
 		return
 	}
+	info := infoFrom(ctx)
+	info.Alias, info.Stream = req.Model, req.Stream
 
 	// An alias the key may not use looks the same as one that doesn't
 	// exist, so a key can't discover what other keys can use.
 	alias, ok := s.router.Alias(req.Model)
 	if !ok || !key.Allows(alias.Name) {
-		api.WriteError(w, &api.Error{
+		writeError(w, r, &api.Error{
 			Status: http.StatusNotFound, Type: api.TypeInvalidRequest, Code: api.CodeModelNotFound, Param: "model",
 			Message: fmt.Sprintf("The model `%s` does not exist or you do not have access to it.", req.Model),
 		})
@@ -75,7 +78,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		maxTokens = alias.DefaultMaxTokens
 	}
 	if maxTokens > alias.MaxTokensCeiling {
-		api.WriteError(w, &api.Error{
+		writeError(w, r, &api.Error{
 			Status: http.StatusBadRequest, Type: api.TypeInvalidRequest, Code: api.CodeInvalidValue, Param: "max_tokens",
 			Message: fmt.Sprintf("Invalid token limit: model `%s` allows at most %d output tokens, got %d.",
 				alias.Name, alias.MaxTokensCeiling, maxTokens),
@@ -96,7 +99,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if v := r.Header.Get(idempotency.Header); v != "" {
 		idemKey, err := idempotency.ParseKey(v)
 		if err != nil {
-			api.WriteError(w, &api.Error{
+			writeError(w, r, &api.Error{
 				Status: http.StatusBadRequest, Type: api.TypeInvalidRequest, Code: api.CodeInvalidIdempotency,
 				Message: err.Error() + ".",
 			})
@@ -109,13 +112,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		switch res.Outcome {
 		case idempotency.Replay:
-			s.replay(w, res, req.Stream, req.IncludeUsage)
+			info.Replayed = true
+			s.replay(w, r, res, req.Stream, req.IncludeUsage)
 			return
 		case idempotency.Proceed:
 			a.idem = res.Lock
 			defer a.endIdempotency(0, nil)
 		default:
-			api.WriteError(w, idempotencyError(res))
+			writeError(w, r, idempotencyError(res))
 			return
 		}
 	}
@@ -126,7 +130,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	a.reserved = usage.EstimatePrompt(req.Messages) + maxTokens
 	if apiErr := s.reserveTokens(key, a.reserved); apiErr != nil {
 		a.finish(0, nil)
-		api.WriteError(w, apiErr)
+		writeError(w, r, apiErr)
 		return
 	}
 	defer a.refundTokens()
@@ -144,7 +148,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, budget.ErrExceeded):
 			a.finish(0, nil)
-			api.WriteError(w, budgetExceeded(key, amount, received))
+			s.metrics.Rejected(metrics.Budget)
+			writeError(w, r, budgetExceeded(key, amount, received))
 			return
 		case err != nil:
 			a.finish(0, nil)
@@ -170,12 +175,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	resp, result, err := s.router.Chat(ctx, alias, creq)
 	s.logTries(ctx, alias.Name, result, err)
+	s.recordRouting(info, alias.Name, result)
 	w.Header().Set(HeaderProvider, result.Provider)
 	w.Header().Set(HeaderAttempts, strconv.Itoa(result.Attempts))
 	if err != nil {
 		a.finish(0, nil)
 		if apiErr := s.upstreamError(ctx, err); apiErr != nil {
-			api.WriteError(w, apiErr)
+			writeError(w, r, apiErr)
 		}
 		return
 	}
@@ -183,8 +189,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Steps 10 and 11: save the outcome, then send it. If the process
 	// stopped in between, a retry with the same idempotency key would get
 	// the stored response instead of a second provider call.
-	u, _ := usageOrEstimate(resp.Usage, creq, resp.Content)
-	a.recordUsage(result.Provider, result.Model, u)
+	u, estimated := usageOrEstimate(resp.Usage, creq, resp.Content)
+	a.recordUsage(result.Provider, result.Model, u, estimated)
 	out, err := json.Marshal(api.NewChatCompletion("chatcmpl-"+rand.Text(), received, resp, u))
 	if err != nil {
 		a.finish(0, nil)
@@ -200,7 +206,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // internalError answers with a 500 for a bug, and logs it.
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	s.log.ErrorContext(r.Context(), "internal error", "request_id", RequestID(r.Context()), "error", err)
-	api.WriteError(w, &api.Error{
+	writeError(w, r, &api.Error{
 		Status: http.StatusInternalServerError, Type: api.TypeServer, Code: api.CodeInternal,
 		Message: "The gateway hit an internal error.",
 	})
@@ -213,7 +219,7 @@ func (s *Server) unavailable(w http.ResponseWriter, r *http.Request, code, what 
 		return // the client went away
 	}
 	s.log.ErrorContext(r.Context(), "database step failed", "request_id", RequestID(r.Context()), "code", code, "error", err)
-	api.WriteError(w, &api.Error{
+	writeError(w, r, &api.Error{
 		Status: http.StatusServiceUnavailable, Type: api.TypeServer, Code: code,
 		Message: what + " can't be checked right now. Retry shortly.", RetryAfter: time.Second,
 	})
@@ -350,7 +356,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 // handleUnknown answers any other /v1/ path with OpenAI's 404 error.
 func handleUnknown(w http.ResponseWriter, r *http.Request) {
-	api.WriteError(w, &api.Error{
+	writeError(w, r, &api.Error{
 		Status: http.StatusNotFound, Type: api.TypeInvalidRequest,
 		Message: fmt.Sprintf("Invalid URL (%s %s)", r.Method, r.URL.Path),
 	})

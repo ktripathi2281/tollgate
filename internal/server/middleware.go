@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ktripathi2281/tollgate/internal/api"
+	"github.com/ktripathi2281/tollgate/internal/usage"
 )
 
 // Response headers. The gateway's own headers share one prefix, so renaming
@@ -29,6 +30,7 @@ type ctxKey int
 const (
 	requestIDKey ctxKey = iota
 	apiKeyKey
+	requestInfoKey
 )
 
 // RequestID returns the request ID stored in ctx, or "" if there is none.
@@ -77,11 +79,20 @@ func (rec *responseRecorder) Unwrap() http.ResponseWriter {
 	return rec.ResponseWriter
 }
 
-// logRequests writes one access log line per request. It logs only request
-// metadata: never headers, bodies, prompts or completions.
-func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+// logRequests writes one access log line per request, and records the
+// request's duration by route and status. A chat request also gets a
+// requestInfo, which the handlers fill in, and which becomes its
+// request-log row and its chat metrics once the response is done. The
+// access log holds only request metadata: never headers, bodies, prompts
+// or completions.
+func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		var info *requestInfo
+		if r.Method == http.MethodPost && r.URL.Path == chatPath {
+			info = &requestInfo{Entry: usage.Entry{Time: start, RequestID: RequestID(r.Context())}}
+			r = r.WithContext(context.WithValue(r.Context(), requestInfoKey, info))
+		}
 		rec := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 
@@ -89,18 +100,26 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK // net/http sends 200 when a handler writes nothing
 		}
+		elapsed := time.Since(start)
 		level := slog.LevelInfo
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			level = slog.LevelDebug // probes would otherwise drown the log
 		}
-		log.LogAttrs(r.Context(), level, "request",
+		s.log.LogAttrs(r.Context(), level, "request",
 			slog.String("request_id", RequestID(r.Context())),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", status),
 			slog.Int64("bytes", rec.bytes),
-			slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000),
+			slog.Float64("duration_ms", float64(elapsed.Microseconds())/1000),
 		)
+		s.metrics.HTTPRequest(routeOf(r.URL.Path), status, elapsed)
+
+		if info != nil {
+			info.Status, info.Latency = status, elapsed
+			s.observeChat(info)
+			s.requests.Record(info.Entry) // never blocks: a full queue drops the row
+		}
 	})
 }
 
@@ -123,7 +142,7 @@ func recoverPanics(log *slog.Logger, next http.Handler) http.Handler {
 				slog.String("panic", fmt.Sprint(v)),
 				slog.String("stack", string(debug.Stack())),
 			)
-			api.WriteError(w, &api.Error{
+			writeError(w, r, &api.Error{
 				Status:  http.StatusInternalServerError,
 				Type:    api.TypeServer,
 				Code:    api.CodeInternal,
@@ -134,19 +153,19 @@ func recoverPanics(log *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-// limitInflight lets at most max requests through to next at once. The
-// slots are a buffered channel used as a semaphore: sending takes a slot,
-// receiving gives it back. A request that finds no free slot is shed at
-// once with 503, because queueing would only add latency under overload.
-func limitInflight(max int, next http.Handler) http.Handler {
-	slots := make(chan struct{}, max)
+// limitInflight lets at most cap(s.inflight) requests through to next at
+// once. The slots are a buffered channel used as a semaphore: sending takes
+// a slot, receiving gives it back, and its length is the requests in
+// flight. A request that finds no free slot is shed at once with 503,
+// because queueing would only add latency under overload.
+func (s *Server) limitInflight(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
-		case slots <- struct{}{}:
-			defer func() { <-slots }()
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
 			next.ServeHTTP(w, r)
 		default:
-			api.WriteError(w, &api.Error{
+			writeError(w, r, &api.Error{
 				Status:     http.StatusServiceUnavailable,
 				Type:       api.TypeServer,
 				Code:       api.CodeOverloaded,

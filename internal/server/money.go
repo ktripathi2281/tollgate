@@ -52,6 +52,7 @@ type accounting struct {
 	ctx       context.Context // not cancelled with the request
 	key       auth.Key
 	requestID string
+	info      *requestInfo // the request-log row, which gets the usage too
 
 	idem     *idempotency.Lock // step 6; nil without an Idempotency-Key
 	idemDone bool
@@ -70,15 +71,19 @@ func (s *Server) newAccounting(r *http.Request, key auth.Key) *accounting {
 		ctx:       context.WithoutCancel(r.Context()),
 		key:       key,
 		requestID: RequestID(r.Context()),
+		info:      infoFrom(r.Context()),
 	}
 }
 
 // recordUsage notes what the request used, priced at the target that
-// served it.
-func (a *accounting) recordUsage(providerName, model string, u provider.Usage) {
+// served it, here and in its request-log row. estimated says the counts
+// are the gateway's estimate, not the provider's.
+func (a *accounting) recordUsage(providerName, model string, u provider.Usage, estimated bool) {
 	a.used = u.PromptTokens + u.CompletionTokens
 	a.cost = usage.Cost(a.s.pricing[config.PriceKey(providerName, model)], u.PromptTokens, u.CompletionTokens)
 	a.spent = true
+	a.info.PromptTokens, a.info.CompletionTokens = u.PromptTokens, u.CompletionTokens
+	a.info.UsageEstimated, a.info.Cost = estimated, a.cost
 }
 
 // finish persists the request's outcome (pipeline step 10). The hold is
@@ -189,7 +194,7 @@ func idempotencyError(res idempotency.Result) *api.Error {
 // replay sends a stored response again. A streaming request gets it as a
 // minimal stream: the whole reply in one content event. The same request
 // body always asks for the same form, so the request decides.
-func (s *Server) replay(w http.ResponseWriter, res idempotency.Result, stream, includeUsage bool) {
+func (s *Server) replay(w http.ResponseWriter, r *http.Request, res idempotency.Result, stream, includeUsage bool) {
 	h := w.Header()
 	h.Set(HeaderReplayed, "true")
 	h.Set(HeaderAttempts, "0")
@@ -203,7 +208,7 @@ func (s *Server) replay(w http.ResponseWriter, res idempotency.Result, stream, i
 	var c api.ChatCompletion
 	if err := json.Unmarshal(res.Body, &c); err != nil || len(c.Choices) != 1 {
 		s.log.Error("a stored response can't be replayed as a stream", "error", err)
-		api.WriteError(w, &api.Error{
+		writeError(w, r, &api.Error{
 			Status: http.StatusInternalServerError, Type: api.TypeServer, Code: api.CodeInternal,
 			Message: "The stored response for this Idempotency-Key can't be replayed.",
 		})

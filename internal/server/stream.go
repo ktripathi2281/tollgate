@@ -27,6 +27,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 
 	stream, result, err := s.router.ChatStream(ctx, alias, req)
 	s.logTries(ctx, alias.Name, result, err)
+	info := a.info
+	s.recordRouting(info, alias.Name, result)
 	w.Header().Set(HeaderProvider, result.Provider)
 	w.Header().Set(HeaderAttempts, strconv.Itoa(result.Attempts))
 	if err != nil {
@@ -34,7 +36,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 		// failure is an ordinary error response.
 		a.finish(0, nil)
 		if apiErr := s.upstreamError(ctx, err); apiErr != nil {
-			api.WriteError(w, apiErr)
+			writeError(w, r, apiErr)
 		}
 		return
 	}
@@ -56,7 +58,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 	// spent records what the stream used so far and logs how it ended.
 	spent := func(outcome string) {
 		u, estimated := usageOrEstimate(reported, req, reply.String())
-		a.recordUsage(result.Provider, result.Model, u)
+		a.recordUsage(result.Provider, result.Model, u, estimated)
 		s.log.InfoContext(ctx, "stream ended",
 			slog.String("request_id", RequestID(ctx)),
 			slog.String("provider", result.Provider),
@@ -94,11 +96,15 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, alias *route
 				failed("client_gone")
 				return
 			}
+			info.ErrorCode = apiErr.Code
 			_ = out.send(apiErr.Envelope())
 			failed(apiErr.Code)
 			return
 		}
 		if chunk.Delta != "" {
+			if reply.Len() == 0 {
+				info.TTFT = time.Since(info.Time)
+			}
 			reply.WriteString(chunk.Delta)
 			if out.send(chunks.Content(chunk.Delta)) != nil {
 				failed("client_gone")
