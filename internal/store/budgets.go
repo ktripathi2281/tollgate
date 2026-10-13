@@ -28,33 +28,22 @@ type HoldParams struct {
 }
 
 // PlaceHold reserves p.Amount of the key's budget for the period and
-// returns the hold's ID. In one transaction it makes sure the period's row
-// exists, adds the amount to held only if spent + held + amount stays
-// within the budget, and inserts the hold. It returns ErrBudgetExceeded,
-// and changes nothing, if the hold doesn't fit.
+// returns the hold's ID. It makes sure the period's row exists, then, in
+// one statement, adds the amount to held only if spent + held + amount
+// stays within the budget, and inserts the hold. It returns
+// ErrBudgetExceeded, and changes nothing, if the hold doesn't fit.
 func (s *Store) PlaceHold(ctx context.Context, p HoldParams) (int64, error) {
-	var id int64
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.q.WithTx(tx)
-		err := q.EnsureBudgetPeriod(ctx, db.EnsureBudgetPeriodParams{KeyID: p.KeyID, PeriodStart: p.PeriodStart})
-		if err != nil {
-			return err
-		}
-		n, err := q.ReserveBudget(ctx, db.ReserveBudgetParams{
-			Amount: int64(p.Amount), KeyID: p.KeyID, PeriodStart: p.PeriodStart, Budget: int64(p.Budget),
-		})
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return ErrBudgetExceeded
-		}
-		id, err = q.InsertHold(ctx, db.InsertHoldParams{
-			KeyID: p.KeyID, PeriodStart: p.PeriodStart, RequestID: p.RequestID,
-			Amount: int64(p.Amount), Now: p.Now, ExpiresAt: p.ExpiresAt,
-		})
-		return err
+	err := s.q.EnsureBudgetPeriod(ctx, db.EnsureBudgetPeriodParams{KeyID: p.KeyID, PeriodStart: p.PeriodStart})
+	if err != nil {
+		return 0, fmt.Errorf("place hold: %w", err)
+	}
+	id, err := s.q.PlaceHold(ctx, db.PlaceHoldParams{
+		RequestID: p.RequestID, Amount: int64(p.Amount), Now: p.Now, ExpiresAt: p.ExpiresAt,
+		KeyID: p.KeyID, PeriodStart: p.PeriodStart, Budget: int64(p.Budget),
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("place hold: %w", ErrBudgetExceeded)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("place hold: %w", err)
 	}
@@ -74,69 +63,43 @@ const (
 )
 
 // SettleHold marks a hold settled with its actual cost and, in the same
-// transaction, takes the hold's amount out of the period's held and adds
-// the cost to its spent. The cost may be more than the hold. It returns
+// statement, takes the hold's amount out of the period's held and adds the
+// cost to its spent. The cost may be more than the hold. It returns
 // ErrNotFound if there is no such hold.
 func (s *Store) SettleHold(ctx context.Context, id int64, cost money.Micros, now time.Time) (Resolution, error) {
-	return s.resolveHold(ctx, id, true, cost, now)
+	_, err := s.q.SettleHold(ctx, db.SettleHoldParams{Cost: int64(cost), Now: now, ID: id})
+	return s.resolution(ctx, "settle", id, err)
 }
 
-// ReleaseHold marks a hold released and, in the same transaction, takes
-// its amount out of the period's held. It returns ErrNotFound if there is
-// no such hold.
+// ReleaseHold marks a hold released and, in the same statement, takes its
+// amount out of the period's held. It returns ErrNotFound if there is no
+// such hold.
 func (s *Store) ReleaseHold(ctx context.Context, id int64, now time.Time) (Resolution, error) {
-	return s.resolveHold(ctx, id, false, 0, now)
+	_, err := s.q.ReleaseHold(ctx, db.ReleaseHoldParams{Now: now, ID: id})
+	return s.resolution(ctx, "release", id, err)
 }
 
-func (s *Store) resolveHold(ctx context.Context, id int64, settle bool, cost money.Micros, now time.Time) (Resolution, error) {
-	res := Resolved
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.q.WithTx(tx)
-		var (
-			keyID  int64
-			period time.Time
-			amount int64
-			err    error
-		)
-		if settle {
-			var row db.SettleHoldRow
-			row, err = q.SettleHold(ctx, db.SettleHoldParams{Cost: int64(cost), Now: now, ID: id})
-			keyID, period, amount = row.KeyID, row.PeriodStart, row.AmountMicros
-		} else {
-			var row db.ReleaseHoldRow
-			row, err = q.ReleaseHold(ctx, db.ReleaseHoldParams{Now: now, ID: id})
-			keyID, period, amount = row.KeyID, row.PeriodStart, row.AmountMicros
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The guard found the hold already resolved, or missing.
-			status, err := q.GetHoldStatus(ctx, id)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			if err != nil {
-				return err
-			}
-			res = AlreadyReleased
-			if status == "settled" {
-				res = AlreadySettled
-			}
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return q.ResolveHoldInPeriod(ctx, db.ResolveHoldInPeriodParams{
-			Amount: amount, Cost: int64(cost), KeyID: keyID, PeriodStart: period,
-		})
-	})
-	if err != nil {
-		verb := "release"
-		if settle {
-			verb = "settle"
-		}
+// resolution interprets the result of a settle or release. No row means
+// the status guard found the hold already resolved, or missing; a terminal
+// status never changes, so reading it afterwards is safe.
+func (s *Store) resolution(ctx context.Context, verb string, id int64, err error) (Resolution, error) {
+	if err == nil {
+		return Resolved, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("%s hold %d: %w", verb, id, err)
 	}
-	return res, nil
+	status, err := s.q.GetHoldStatus(ctx, id)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, fmt.Errorf("%s hold %d: %w", verb, id, ErrNotFound)
+	case err != nil:
+		return 0, fmt.Errorf("%s hold %d: %w", verb, id, err)
+	case status == "settled":
+		return AlreadySettled, nil
+	default:
+		return AlreadyReleased, nil
+	}
 }
 
 // ExpiredHolds returns up to limit holds still held at now whose expiry

@@ -91,29 +91,49 @@ func (q *Queries) GetHoldStatus(ctx context.Context, id int64) (string, error) {
 	return status, err
 }
 
-const insertHold = `-- name: InsertHold :one
+const placeHold = `-- name: PlaceHold :one
+WITH reserved AS (
+    UPDATE budget_periods bp
+    SET held_micros = bp.held_micros + $2::bigint
+    WHERE bp.key_id = $5::bigint
+      AND bp.period_start = $6::timestamptz
+      AND bp.spent_micros + bp.held_micros + $2::bigint <= $7::bigint
+    RETURNING bp.key_id, bp.period_start
+)
 INSERT INTO budget_holds (key_id, period_start, request_id, amount_micros, status, created_at, expires_at)
-VALUES ($1, $2, $3, $4, 'held', $5, $6)
+SELECT r.key_id, r.period_start, $1::text, $2::bigint, 'held', $3::timestamptz, $4::timestamptz
+FROM reserved r
 RETURNING id
 `
 
-type InsertHoldParams struct {
-	KeyID       int64
-	PeriodStart time.Time
+type PlaceHoldParams struct {
 	RequestID   string
 	Amount      int64
 	Now         time.Time
 	ExpiresAt   time.Time
+	KeyID       int64
+	PeriodStart time.Time
+	Budget      int64
 }
 
-func (q *Queries) InsertHold(ctx context.Context, arg InsertHoldParams) (int64, error) {
-	row := q.db.QueryRow(ctx, insertHold,
-		arg.KeyID,
-		arg.PeriodStart,
+// PlaceHold adds a hold to the period's held amount, only if
+// spent + held + amount stays within the budget, and inserts the hold row,
+// in one statement. It returns no row if the hold doesn't fit.
+//
+// The UPDATE locks the period's row, so concurrent holds for one key take
+// turns, and each re-checks the condition against the last one's result.
+// Being one statement, it holds that lock only while Postgres runs it: no
+// network round trip happens in between, which is what lets one key take
+// thousands of holds a second (DECISIONS 59).
+func (q *Queries) PlaceHold(ctx context.Context, arg PlaceHoldParams) (int64, error) {
+	row := q.db.QueryRow(ctx, placeHold,
 		arg.RequestID,
 		arg.Amount,
 		arg.Now,
 		arg.ExpiresAt,
+		arg.KeyID,
+		arg.PeriodStart,
+		arg.Budget,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -170,10 +190,17 @@ func (q *Queries) ReconcileBudgets(ctx context.Context) ([]ReconcileBudgetsRow, 
 }
 
 const releaseHold = `-- name: ReleaseHold :one
-UPDATE budget_holds
-SET status = 'released', resolved_at = $1::timestamptz
-WHERE id = $2 AND status = 'held'
-RETURNING key_id, period_start, amount_micros
+WITH released AS (
+    UPDATE budget_holds h
+    SET status = 'released', resolved_at = $1::timestamptz
+    WHERE h.id = $2::bigint AND h.status = 'held'
+    RETURNING h.key_id, h.period_start, h.amount_micros
+)
+UPDATE budget_periods p
+SET held_micros = p.held_micros - r.amount_micros
+FROM released r
+WHERE p.key_id = r.key_id AND p.period_start = r.period_start
+RETURNING r.amount_micros
 `
 
 type ReleaseHoldParams struct {
@@ -181,82 +208,26 @@ type ReleaseHoldParams struct {
 	ID  int64
 }
 
-type ReleaseHoldRow struct {
-	KeyID        int64
-	PeriodStart  time.Time
-	AmountMicros int64
-}
-
-func (q *Queries) ReleaseHold(ctx context.Context, arg ReleaseHoldParams) (ReleaseHoldRow, error) {
+func (q *Queries) ReleaseHold(ctx context.Context, arg ReleaseHoldParams) (int64, error) {
 	row := q.db.QueryRow(ctx, releaseHold, arg.Now, arg.ID)
-	var i ReleaseHoldRow
-	err := row.Scan(&i.KeyID, &i.PeriodStart, &i.AmountMicros)
-	return i, err
-}
-
-const reserveBudget = `-- name: ReserveBudget :execrows
-UPDATE budget_periods
-SET held_micros = held_micros + $1::bigint
-WHERE key_id = $2
-  AND period_start = $3
-  AND spent_micros + held_micros + $1::bigint <= $4::bigint
-`
-
-type ReserveBudgetParams struct {
-	Amount      int64
-	KeyID       int64
-	PeriodStart time.Time
-	Budget      int64
-}
-
-// ReserveBudget adds a hold to the period's held amount, only if
-// spent + held + amount stays within the budget. The UPDATE locks the row,
-// so concurrent holds for one key take turns, and each sees the last one's
-// amount: the condition can't be passed twice on stale numbers.
-func (q *Queries) ReserveBudget(ctx context.Context, arg ReserveBudgetParams) (int64, error) {
-	result, err := q.db.Exec(ctx, reserveBudget,
-		arg.Amount,
-		arg.KeyID,
-		arg.PeriodStart,
-		arg.Budget,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const resolveHoldInPeriod = `-- name: ResolveHoldInPeriod :exec
-UPDATE budget_periods
-SET held_micros = held_micros - $1::bigint,
-    spent_micros = spent_micros + $2::bigint
-WHERE key_id = $3 AND period_start = $4
-`
-
-type ResolveHoldInPeriodParams struct {
-	Amount      int64
-	Cost        int64
-	KeyID       int64
-	PeriodStart time.Time
-}
-
-// ResolveHoldInPeriod takes a resolved hold's amount out of held, and adds
-// its cost (0 for a release) to spent.
-func (q *Queries) ResolveHoldInPeriod(ctx context.Context, arg ResolveHoldInPeriodParams) error {
-	_, err := q.db.Exec(ctx, resolveHoldInPeriod,
-		arg.Amount,
-		arg.Cost,
-		arg.KeyID,
-		arg.PeriodStart,
-	)
-	return err
+	var amount_micros int64
+	err := row.Scan(&amount_micros)
+	return amount_micros, err
 }
 
 const settleHold = `-- name: SettleHold :one
-UPDATE budget_holds
-SET status = 'settled', settled_micros = $1::bigint, resolved_at = $2::timestamptz
-WHERE id = $3 AND status = 'held'
-RETURNING key_id, period_start, amount_micros
+WITH settled AS (
+    UPDATE budget_holds h
+    SET status = 'settled', settled_micros = $1::bigint, resolved_at = $2::timestamptz
+    WHERE h.id = $3::bigint AND h.status = 'held'
+    RETURNING h.key_id, h.period_start, h.amount_micros
+)
+UPDATE budget_periods p
+SET held_micros = p.held_micros - s.amount_micros,
+    spent_micros = p.spent_micros + $1::bigint
+FROM settled s
+WHERE p.key_id = s.key_id AND p.period_start = s.period_start
+RETURNING s.amount_micros
 `
 
 type SettleHoldParams struct {
@@ -265,18 +236,14 @@ type SettleHoldParams struct {
 	ID   int64
 }
 
-type SettleHoldRow struct {
-	KeyID        int64
-	PeriodStart  time.Time
-	AmountMicros int64
-}
-
-// SettleHold and ReleaseHold move a hold out of 'held'. The status guard
-// makes them no-ops on a hold that has already been resolved, so each hold
-// reaches exactly one terminal state, once.
-func (q *Queries) SettleHold(ctx context.Context, arg SettleHoldParams) (SettleHoldRow, error) {
+// SettleHold and ReleaseHold move a hold out of 'held' and update its
+// period, in one statement: held loses the hold's amount, and spent gains
+// the cost (nothing, for a release). The status guard makes them no-ops on
+// a hold already resolved, so each hold reaches exactly one terminal state,
+// once. They return no row then.
+func (q *Queries) SettleHold(ctx context.Context, arg SettleHoldParams) (int64, error) {
 	row := q.db.QueryRow(ctx, settleHold, arg.Cost, arg.Now, arg.ID)
-	var i SettleHoldRow
-	err := row.Scan(&i.KeyID, &i.PeriodStart, &i.AmountMicros)
-	return i, err
+	var amount_micros int64
+	err := row.Scan(&amount_micros)
+	return amount_micros, err
 }
