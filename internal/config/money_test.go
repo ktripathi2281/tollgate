@@ -91,3 +91,49 @@ func TestParseRejectsPricesAboveTheCap(t *testing.T) {
 		t.Errorf("exactly the cap must be allowed: %v", err)
 	}
 }
+
+func TestParseAdminAndRequestLog(t *testing.T) {
+	cfg, err := config.Parse([]byte(minimal + `
+server: { admin_addr: "0.0.0.0:7070" }
+request_log: { buffer: 100, batch_size: 10, flush_every: 250ms }
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Server.AdminAddr != "0.0.0.0:7070" {
+		t.Errorf("AdminAddr = %q", cfg.Server.AdminAddr)
+	}
+	if want := (config.RequestLog{Buffer: 100, BatchSize: 10, FlushEvery: 250 * time.Millisecond}); cfg.RequestLog != want {
+		t.Errorf("RequestLog = %+v, want %+v", cfg.RequestLog, want)
+	}
+	d := config.Default()
+	if d.Server.AdminAddr != "127.0.0.1:6060" || d.RequestLog != (config.RequestLog{Buffer: 10_000, BatchSize: 500, FlushEvery: time.Second}) {
+		t.Errorf("defaults = %q, %+v", d.Server.AdminAddr, d.RequestLog)
+	}
+	if cfg, err := config.Parse([]byte(minimal + "server: { admin_addr: \"\" }\n")); err != nil || cfg.Server.AdminAddr != "" {
+		t.Errorf("an empty admin_addr turns the listener off: %v, %q", err, cfg.Server.AdminAddr)
+	}
+}
+
+func TestParseRejectsAdminAndRequestLogMistakes(t *testing.T) {
+	tests := []struct {
+		name, yaml, want string
+	}{
+		{"admin address without a port", "server: { admin_addr: localhost }\n", "server.admin_addr"},
+		{"admin on the public address", "server: { addr: \":8080\", admin_addr: \":8080\" }\n", "must differ from server.addr"},
+		{"empty buffer", "request_log: { buffer: 0 }\n", "request_log.buffer"},
+		{"zero batch", "request_log: { batch_size: 0 }\n", "request_log.batch_size"},
+		{"zero interval", "request_log: { flush_every: 0s }\n", "request_log.flush_every"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := config.Parse([]byte(minimal + tt.yaml)); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Parse = %v, want an error mentioning %q", err, tt.want)
+			}
+		})
+	}
+	// Two port-0 addresses each get their own port, so they don't clash.
+	if _, err := config.Parse([]byte(minimal + "server: { addr: \"127.0.0.1:0\", admin_addr: \"127.0.0.1:0\" }\n")); err != nil {
+		t.Errorf("port 0 for both: %v", err)
+	}
+}

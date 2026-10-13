@@ -89,6 +89,7 @@ timeouts:
 					ReadHeaderTimeout: 2 * time.Second,
 					MaxBodyBytes:      1024,
 					MaxInflight:       8,
+					AdminAddr:         "127.0.0.1:6060", // the default
 				}
 				c.Log = config.Log{Level: "debug"}
 				return c

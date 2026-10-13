@@ -37,6 +37,7 @@ type Config struct {
 	Auth        Auth                `yaml:"auth"`
 	Budget      Budget              `yaml:"budget"`
 	Idempotency Idempotency         `yaml:"idempotency"`
+	RequestLog  RequestLog          `yaml:"request_log"`
 	Providers   map[string]Provider `yaml:"providers"`
 	Models      map[string]Model    `yaml:"models"`
 	// Pricing is keyed by "provider/model"; see PriceKey.
@@ -58,6 +59,23 @@ type Server struct {
 	// MaxInflight caps how many API requests are processed at once. Requests
 	// over the cap are shed with 503 instead of queueing.
 	MaxInflight int `yaml:"max_inflight"`
+	// AdminAddr is the host:port of the admin listener, which serves
+	// /metrics and /debug/pprof/. It is bound to localhost by default,
+	// since neither should be public. Empty turns it off.
+	AdminAddr string `yaml:"admin_addr"`
+}
+
+// RequestLog configures the request-log worker, which writes one row per
+// chat request to the database in batches.
+type RequestLog struct {
+	// Buffer is how many rows can wait to be written. When it is full, new
+	// rows are dropped and counted rather than slowing requests down.
+	Buffer int `yaml:"buffer"`
+	// BatchSize is the most rows written in one insert.
+	BatchSize int `yaml:"batch_size"`
+	// FlushEvery is the longest a row waits before a smaller batch is
+	// written.
+	FlushEvery time.Duration `yaml:"flush_every"`
 }
 
 // Log configures structured logging.
@@ -269,6 +287,7 @@ func Default() *Config {
 			ReadHeaderTimeout: 10 * time.Second,
 			MaxBodyBytes:      2 << 20, // 2 MiB
 			MaxInflight:       2000,
+			AdminAddr:         "127.0.0.1:6060",
 		},
 		Log: Log{Level: "info"},
 		Timeouts: Timeouts{
@@ -294,6 +313,7 @@ func Default() *Config {
 			Retention:        24 * time.Hour,
 			MaxResponseBytes: 1 << 20, // 1 MiB
 		},
+		RequestLog: RequestLog{Buffer: 10_000, BatchSize: 500, FlushEvery: time.Second},
 	}
 }
 
@@ -390,6 +410,24 @@ func (c *Config) validateServer(p *problems) {
 	}
 	if s.MaxInflight <= 0 {
 		p.addf("server.max_inflight", "must be positive, got %d", s.MaxInflight)
+	}
+	if s.AdminAddr != "" {
+		if err := checkAddr(s.AdminAddr); err != nil {
+			p.addf("server.admin_addr", "%v", err)
+		} else if s.AdminAddr == s.Addr && !strings.HasSuffix(s.Addr, ":0") {
+			// Port 0 asks the OS for a free port, so two of them don't clash.
+			p.addf("server.admin_addr", "must differ from server.addr, got %q for both", s.Addr)
+		}
+	}
+	l := c.RequestLog
+	if l.Buffer < 1 {
+		p.addf("request_log.buffer", "must be at least 1, got %d", l.Buffer)
+	}
+	if l.BatchSize < 1 {
+		p.addf("request_log.batch_size", "must be at least 1, got %d", l.BatchSize)
+	}
+	if l.FlushEvery <= 0 {
+		p.addf("request_log.flush_every", "must be positive, got %s", l.FlushEvery)
 	}
 }
 
