@@ -103,6 +103,26 @@ func (r *Router) Names() []string {
 	return slices.Clone(r.names)
 }
 
+// BreakerState is one target's circuit-breaker state, for metrics.
+type BreakerState struct {
+	Alias  string
+	Target string // provider/model
+	State  string // "closed", "open" or "half_open"
+}
+
+// BreakerStates returns every target's breaker state. A breaker reports
+// open until a call after its cool-down moves it to half-open.
+func (r *Router) BreakerStates() []BreakerState {
+	var states []BreakerState
+	for _, name := range r.names {
+		for i := range r.aliases[name].Targets {
+			t := &r.aliases[name].Targets[i]
+			states = append(states, BreakerState{Alias: name, Target: t.String(), State: t.breaker.currentState().String()})
+		}
+	}
+	return states
+}
+
 // Result says which target served a call, and how it got there.
 type Result struct {
 	Provider string // of the target that served the call, or the last one tried
