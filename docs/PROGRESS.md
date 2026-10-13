@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M6, logs and observability. Built; waiting for the M6 exercise and the maintainer's review.
+**Current milestone:** M6, logs and observability. Done; waiting for the go-ahead for M7.
 
 ## Done
 
@@ -18,13 +18,13 @@
 
 | Check | Status |
 |---|---|
-| The worker flushes by size and by time, drains on shutdown, and counts drops when the channel is full | waits for the exercise: `TestBatchFlushesBySize`, `TestBatchFlushesByTime`, `TestBatchDrainsOnShutdown` (internal/usage), `TestServeObservability` (cmd/tollgate, end to end); drops counted: pass, `TestRecordDropsWhenTheQueueIsFull` (internal/usage) |
-| Handlers never block on logging (test with a stalled database) | pass: `TestHandlersDoNotWaitForAStalledRequestLog` (internal/server); `TestRecordDoesNotWaitForAStalledDatabase` (internal/usage) waits for the exercise |
+| The worker flushes by size and by time, drains on shutdown, and counts drops when the channel is full | pass: `TestBatchFlushesBySize`, `TestBatchFlushesByTime`, `TestBatchDrainsOnShutdown`, `TestRecordDropsWhenTheQueueIsFull` (internal/usage), `TestServeObservability` (cmd/tollgate, end to end) |
+| Handlers never block on logging (test with a stalled database) | pass: `TestHandlersDoNotWaitForAStalledRequestLog` (internal/server), `TestRecordDoesNotWaitForAStalledDatabase` (internal/usage) |
 | Metrics are visible in Prometheus through compose (manual) | pass, 2026-10-13: target `gateway:6060` up; request, upstream, token, breaker and in-flight series queried from Prometheus |
 
 ## Next
 
-- Maintainer: implement `batch`; review M6.
+- Maintainer: review M6.
 - Then: M7, benchmarks, docs and deployment.
 
 ## Open questions
@@ -33,4 +33,4 @@
 
 ## Pending exercises
 
-- **M6: `batch`** in `internal/usage/requestlog.go`. Tests: the four `TestBatch*` tests, `TestRecordDoesNotWaitForAStalledDatabase` and `TestFailedWritesAreCounted` (internal/usage), and `TestServeObservability` (cmd/tollgate). Until it's done, the worker never reads its queue, so no request-log row is written, every row past the buffer is dropped, and `make test` (and CI) fails there.
+None. The M6 exercise, `batch`, was written on request.
