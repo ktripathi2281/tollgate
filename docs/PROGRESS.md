@@ -1,6 +1,6 @@
 # Progress
 
-**Current milestone:** M7, benchmarks, docs and deployment. Built; waiting for the M7 exercise, the maintainer's review, and the hosted demo's deploy, which needs the maintainer's own Render and Supabase accounts.
+**Current milestone:** M7, benchmarks, docs and deployment. Done: all milestones built. Left for the maintainer: the review, the hosted demo's deploy (their own Render and Supabase accounts), and the M3 smoke run.
 
 ## Done
 
@@ -19,10 +19,10 @@
 
 | Check | Status |
 |---|---|
-| `cmd/loadgen` with URL, key, model, concurrency, duration, target rate and streaming; reports requests/s, errors by status, p50/p95/p99 for latency and time to first token | built; its percentiles wait for the exercise (`TestPercentiles`, `TestLoadNonStreaming`, `TestLoadStreaming`, `TestReport`, cmd/loadgen) |
+| `cmd/loadgen` with URL, key, model, concurrency, duration, target rate and streaming; reports requests/s, errors by status, p50/p95/p99 for latency and time to first token | pass: `TestPercentiles`, `TestLoadNonStreaming`, `TestLoadStreaming`, `TestReport`, `TestLoadAtATargetRate` (cmd/loadgen) |
 | Baseline and through-gateway runs, streaming and not, with and without a budget, at 50, 200 and 1,000 workers; a zero-latency ceiling with a CPU profile and one fix, before and after | done, 2026-10-13: `docs/BENCHMARKS.md` |
 | `tollgate reconcile` passes after the budgeted runs | pass: 0 mismatched, in every run |
-| `make bench` reproduces `docs/BENCHMARKS.md` | yes, once the exercise is in |
+| `make bench` reproduces `docs/BENCHMARKS.md` | yes |
 | The README quickstart works from a clean clone | pass, 2026-10-13: a fresh clone without `.env` came up with `docker compose up -d --build`; every README command worked once the image's working directory was fixed |
 | No secrets in the repository | pass: no keys tracked; the only password is the local Postgres container's |
 | `docker compose up` brings everything up, and the mock alias works without provider keys | pass |
@@ -30,7 +30,7 @@
 
 ## Next
 
-- Maintainer: implement `percentilesOf`; review M7; deploy the demo by following `docs/DEPLOY.md`; and, whenever convenient, put `ANTHROPIC_API_KEY` in `.env` and run `make smoke` (still pending from M3).
+- Maintainer: review M7; deploy the demo by following `docs/DEPLOY.md`; and, whenever convenient, put `ANTHROPIC_API_KEY` in `.env` and run `make smoke` (still pending from M3).
 
 ## Open questions
 
@@ -38,4 +38,4 @@
 
 ## Pending exercises
 
-- **M7: `percentilesOf`** in `cmd/loadgen/main.go`. Tests: `TestPercentiles`, `TestLoadNonStreaming`, `TestLoadStreaming` and `TestReport` (cmd/loadgen). Until it's done, every percentile the load generator reports is 0, so `make bench` can't reproduce the tables, and `make test` (and CI) fails there.
+None. The M7 exercise, `percentilesOf`, was written on request.
