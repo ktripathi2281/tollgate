@@ -113,9 +113,44 @@ func (r *Recorder) write(entries []Entry) {
 // it, and returns. flush never gets an empty batch, and each batch is a
 // slice of its own.
 func batch(ctx context.Context, in <-chan Entry, size int, interval time.Duration, flush func([]Entry)) {
-	// EXERCISE: implement batch; requestlog_test.go has every case it must pass.
-	// Hint: one select over in, a time.Ticker and ctx.Done(). When ctx is
-	// done, drain in with a select that has a default case, then flush.
-	_, _, _, _ = in, size, interval, flush
-	<-ctx.Done() // until it's written, no request-log row is ever written
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	buf := make([]Entry, 0, size)
+	// send flushes a non-empty batch and starts a new slice, since flush
+	// may keep the old one.
+	send := func() {
+		if len(buf) > 0 {
+			flush(buf)
+			buf = make([]Entry, 0, size)
+		}
+	}
+	add := func(e Entry) {
+		buf = append(buf, e)
+		if len(buf) == size {
+			send()
+		}
+	}
+
+	for {
+		select {
+		case e := <-in:
+			add(e)
+		case <-tick.C:
+			send()
+		case <-ctx.Done():
+			// Drain what is queued now: the default case runs once the
+			// queue is empty. Nothing closes the channel, so a late sender
+			// just leaves its entry unread.
+			for {
+				select {
+				case e := <-in:
+					add(e)
+				default:
+					send()
+					return
+				}
+			}
+		}
+	}
 }
