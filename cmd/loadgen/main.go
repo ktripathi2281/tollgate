@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -292,11 +293,21 @@ func summarise(o options, samples []sample, elapsed time.Duration) *report {
 // percentile is the smallest value with at least p% of the values at or
 // below it. It returns zeros for no values.
 func percentilesOf(ds []time.Duration) percentiles {
-	// EXERCISE: implement percentilesOf; main_test.go has the cases it must pass.
-	// Hint: sort ds; the p-th percentile is ds[ceil(p/100 × n) - 1], and a
-	// duration in milliseconds is float64(d.Microseconds()) / 1000.
-	_ = ds
-	return percentiles{} // until it's written, every percentile reads 0
+	if len(ds) == 0 {
+		return percentiles{}
+	}
+	slices.Sort(ds)
+	at := func(p float64) float64 {
+		// The rank is ceil(p% of n), counting from 1; the index is one less.
+		i := int(math.Ceil(p/100*float64(len(ds)))) - 1
+		return ms(ds[max(i, 0)])
+	}
+	return percentiles{P50: at(50), P95: at(95), P99: at(99), Max: ms(ds[len(ds)-1])}
+}
+
+// ms converts a duration to milliseconds, to the microsecond.
+func ms(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
 }
 
 func (r *report) print(w io.Writer) {
