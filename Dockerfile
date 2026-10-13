@@ -14,8 +14,12 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/tollgate /out/mockupstream /usr/local/bin/
 # config.yaml is for docker compose; demo.yaml for the hosted demo.
 COPY deploy/config.yaml deploy/demo.yaml /etc/tollgate/
+# Commands run in the config directory, so their default config path,
+# config.yaml, finds the file: `serve`, and `keys create -models`, which
+# checks aliases against it.
+WORKDIR /etc/tollgate
 # 8080 is the API; 6060 the admin listener (metrics and pprof), which
 # docker-compose.yml keeps on the internal network.
 EXPOSE 8080 6060
 ENTRYPOINT ["tollgate"]
-CMD ["serve", "--config", "/etc/tollgate/config.yaml"]
+CMD ["serve"]
