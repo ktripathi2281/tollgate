@@ -1,10 +1,15 @@
-# Local services. For now that is only Postgres; the gateway, the mock
-# upstream and Prometheus join in M7.
+# The gateway with its database and Prometheus.
 #
-#   docker compose up -d --wait postgres     (or: make db)
+#   docker compose up -d --build
+#   docker compose exec gateway tollgate keys create -name demo
 #
-# The password is for this local container only. A real deployment gets its
-# database URL from its secret store.
+# The API is on localhost:8080 and Prometheus on localhost:9090. The
+# gateway's admin listener (metrics, pprof) stays on the compose network.
+# The database password is for this local setup only. The mock upstream
+# joins in M7, for the benchmarks.
+
+x-database-url: &database-url postgres://tollgate:tollgate@postgres:5432/tollgate?sslmode=disable
+
 services:
   postgres:
     image: postgres:18-alpine
@@ -22,6 +27,39 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # Applies the migrations, then exits. The gateway starts after it.
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    build: .
+    environment:
+      DATABASE_URL: *database-url
+    # Provider keys, if .env has them; the mock aliases work without.
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - gateway
 
 volumes:
   pgdata:

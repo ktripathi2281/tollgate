@@ -1,0 +1,8 @@
+# Prometheus for docker-compose.yml: scrape the gateway's admin listener.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: tollgate
+    static_configs:
+      - targets: ["gateway:6060"]

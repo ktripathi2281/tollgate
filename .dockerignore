@@ -1,0 +1,7 @@
+# Keep secrets and local clutter out of the build context.
+.env
+.git
+.venv
+bin
+notes
+*.test
