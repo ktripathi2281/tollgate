@@ -23,6 +23,10 @@ import (
 // what they hold) before their connections are closed.
 const unwindTimeout = 5 * time.Second
 
+// finishTimeout bounds how long, after those handlers have returned, their
+// connections get to finish writing their responses.
+const finishTimeout = time.Second
+
 // Server is the public HTTP server.
 type Server struct {
 	cfg      config.Server
@@ -141,7 +145,8 @@ func (s *Server) trackHandlers(next http.Handler) http.Handler {
 //  2. If any are still running, cancel their contexts with errShuttingDown,
 //     so streams end with an error event instead of being cut off, and wait
 //     a short, bounded time for them to return.
-//  3. Close whatever connections are left.
+//  3. Give their connections a second to finish writing responses, then
+//     close whatever connections are left.
 //
 // It returns nil if every request finished within the grace period, and an
 // error if the server failed or requests had to be cancelled.
@@ -181,9 +186,16 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		if !s.waitForHandlers(unwindTimeout) {
 			s.log.Warn("requests still running after cancellation, closing their connections")
 		}
-		if err := s.http.Close(); err != nil {
-			shutdownErr = errors.Join(shutdownErr, err)
+		// A handler returning isn't its response finishing: net/http still
+		// writes the end of a chunked body. A second Shutdown waits a moment
+		// for the connections to finish and go idle; Close ends the rest.
+		finishCtx, cancelFinish := context.WithTimeout(context.Background(), finishTimeout)
+		if s.http.Shutdown(finishCtx) != nil {
+			if err := s.http.Close(); err != nil {
+				shutdownErr = errors.Join(shutdownErr, err)
+			}
 		}
+		cancelFinish()
 	}
 
 	// Once Shutdown or Close has started, Serve returns ErrServerClosed.
